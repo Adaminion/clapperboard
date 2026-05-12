@@ -127,14 +127,25 @@ class ClapperboardScreen extends StatefulWidget {
 class _ClapperboardScreenState extends State<ClapperboardScreen> {
   static const _kDataKey = 'clap_data';
   static const _kPresetsKey = 'clap_presets';
+  static const _kTextSizeKey = 'text_size';
+
+  static const Map<String, double> _textScales = {
+    'S': 0.85,
+    'M': 1.0,
+    'L': 1.5,
+    'XL': 2.0,
+  };
 
   ClapData _data = ClapData();
   List<Preset> _presets = [];
+  String _textSize = 'M';
   bool _clapping = false;
   DateTime _now = DateTime.now();
   Timer? _clockTimer;
   Timer? _clapTimer;
   SharedPreferences? _prefs;
+
+  double get _scale => _textScales[_textSize] ?? 1.0;
 
   @override
   void initState() {
@@ -169,6 +180,10 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
             .map((e) => Preset.fromJson(e as Map<String, dynamic>))
             .toList();
       } catch (_) {}
+    }
+    final savedTextSize = prefs.getString(_kTextSizeKey);
+    if (savedTextSize != null && _textScales.containsKey(savedTextSize)) {
+      _textSize = savedTextSize;
     }
     if (mounted) setState(() {});
   }
@@ -274,6 +289,12 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
               onTap: () => Navigator.pop(ctx, 'load'),
             ),
             ListTile(
+              leading: const Icon(Icons.format_size, color: Colors.white),
+              title: Text('Text size: $_textSize',
+                  style: const TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(ctx, 'textsize'),
+            ),
+            ListTile(
               leading: const Icon(Icons.refresh, color: Colors.white),
               title: const Text('Reset scene & take to 1',
                   style: TextStyle(color: Colors.white)),
@@ -286,12 +307,46 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
     if (!mounted) return;
     if (action == 'save') await _savePresetDialog();
     if (action == 'load') await _loadPresetDialog();
+    if (action == 'textsize') await _textSizeDialog();
     if (action == 'reset') {
       setState(() {
         _data.scene = '1';
         _data.take = '1';
       });
       _saveData();
+    }
+  }
+
+  Future<void> _textSizeDialog() async {
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Text size'),
+        children: _textScales.keys
+            .map((k) => SimpleDialogOption(
+                  onPressed: () => Navigator.pop(ctx, k),
+                  child: Row(
+                    children: [
+                      SizedBox(
+                        width: 40,
+                        child: Text(k,
+                            style: const TextStyle(
+                                fontWeight: FontWeight.bold)),
+                      ),
+                      Text('× ${_textScales[k]!.toStringAsFixed(2)}'),
+                      if (k == _textSize) ...const [
+                        SizedBox(width: 12),
+                        Icon(Icons.check, size: 18),
+                      ],
+                    ],
+                  ),
+                ))
+            .toList(),
+      ),
+    );
+    if (picked != null) {
+      setState(() => _textSize = picked);
+      await _prefs?.setString(_kTextSizeKey, picked);
     }
   }
 
@@ -378,7 +433,10 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
   Widget build(BuildContext context) {
     final bg = _clapping ? Colors.white : Colors.black;
     final fg = _clapping ? Colors.black : Colors.white;
-    final divider = fg.withValues(alpha: 0.6);
+    final dimFg = fg.withValues(alpha: 0.45);
+    final divider = fg.withValues(alpha: 0.7);
+    final scale = _scale;
+    const dividerThickness = 5.0;
 
     return Scaffold(
       backgroundColor: bg,
@@ -390,7 +448,9 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
               value: _data.title,
               fg: fg,
               divider: divider,
-              height: 56,
+              dividerThickness: dividerThickness,
+              height: 56 * scale,
+              scale: scale,
               onLongPress: () =>
                   _editField('TITLE', _data.title, (v) => _data.title = v),
             ),
@@ -399,7 +459,9 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
               value: _fmtDateTime(_now),
               fg: fg,
               divider: divider,
-              height: 48,
+              dividerThickness: dividerThickness,
+              height: 44 * scale,
+              scale: scale,
               valueOnly: true,
             ),
             Expanded(
@@ -410,6 +472,8 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                       label: 'SCENE',
                       value: _data.scene,
                       fg: fg,
+                      dimFg: dimFg,
+                      scale: scale,
                       onPlus: () => _bumpScene(1),
                       onMinus: () => _bumpScene(-1),
                       onClear: () => _clearField(() => _data.scene = ''),
@@ -420,12 +484,14 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                       ),
                     ),
                   ),
-                  _VDivider(color: divider),
+                  _VDivider(color: divider, thickness: dividerThickness),
                   Expanded(
                     child: _BumpCell(
                       label: 'TAKE',
                       value: _data.take,
                       fg: fg,
+                      dimFg: dimFg,
+                      scale: scale,
                       onPlus: () => _bumpTake(1),
                       onMinus: () => _bumpTake(-1),
                       onClear: () => _clearField(() => _data.take = ''),
@@ -436,12 +502,13 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                       ),
                     ),
                   ),
-                  _VDivider(color: divider),
+                  _VDivider(color: divider, thickness: dividerThickness),
                   Expanded(
                     child: _SimpleCell(
                       label: 'ROLL',
                       value: _data.roll,
                       fg: fg,
+                      scale: scale,
                       onLongPress: () => _editField(
                           'ROLL', _data.roll, (v) => _data.roll = v),
                     ),
@@ -449,7 +516,7 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                 ],
               ),
             ),
-            Container(height: 1, color: divider),
+            Container(height: dividerThickness, color: divider),
             Expanded(
               child: Row(
                 children: [
@@ -458,16 +525,18 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                       label: 'CAMERA',
                       value: _data.camera,
                       fg: fg,
+                      scale: scale,
                       onLongPress: () => _editField(
                           'CAMERA', _data.camera, (v) => _data.camera = v),
                     ),
                   ),
-                  _VDivider(color: divider),
+                  _VDivider(color: divider, thickness: dividerThickness),
                   Expanded(
                     child: _SimpleCell(
                       label: 'FPS',
                       value: _data.fps,
                       fg: fg,
+                      scale: scale,
                       onLongPress: () => _editField(
                         'FPS',
                         _data.fps,
@@ -477,12 +546,13 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                       ),
                     ),
                   ),
-                  _VDivider(color: divider),
+                  _VDivider(color: divider, thickness: dividerThickness),
                   Expanded(
                     child: _SimpleCell(
                       label: 'SOUND',
                       value: _data.sound,
                       fg: fg,
+                      scale: scale,
                       onLongPress: () => _editField(
                           'SOUND', _data.sound, (v) => _data.sound = v),
                     ),
@@ -490,9 +560,9 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                 ],
               ),
             ),
-            Container(height: 1, color: divider),
+            Container(height: dividerThickness, color: divider),
             SizedBox(
-              height: 72,
+              height: 72 * scale,
               child: Row(
                 children: [
                   Expanded(
@@ -502,8 +572,8 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                         child: Text(
                           'CLAP',
                           style: TextStyle(
-                            color: fg,
-                            fontSize: 32,
+                            color: dimFg,
+                            fontSize: 32 * scale,
                             fontWeight: FontWeight.bold,
                             letterSpacing: 8,
                           ),
@@ -511,11 +581,11 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                       ),
                     ),
                   ),
-                  Container(width: 1, color: divider),
+                  Container(width: dividerThickness, color: divider),
                   SizedBox(
-                    width: 72,
+                    width: 72 * scale,
                     child: IconButton(
-                      icon: Icon(Icons.menu, color: fg, size: 32),
+                      icon: Icon(Icons.menu, color: dimFg, size: 32 * scale),
                       onPressed: _openMenu,
                     ),
                   ),
@@ -534,7 +604,9 @@ class _HeaderCell extends StatelessWidget {
   final String value;
   final Color fg;
   final Color divider;
+  final double dividerThickness;
   final double height;
+  final double scale;
   final bool valueOnly;
   final VoidCallback? onLongPress;
 
@@ -543,7 +615,9 @@ class _HeaderCell extends StatelessWidget {
     required this.value,
     required this.fg,
     required this.divider,
+    required this.dividerThickness,
     required this.height,
+    required this.scale,
     this.valueOnly = false,
     this.onLongPress,
   });
@@ -557,19 +631,22 @@ class _HeaderCell extends StatelessWidget {
       child: Container(
         height: height,
         decoration: BoxDecoration(
-          border: Border(bottom: BorderSide(color: divider)),
+          border: Border(
+              bottom: BorderSide(color: divider, width: dividerThickness)),
         ),
         alignment: Alignment.center,
-        child: Text(
-          shown,
-          style: TextStyle(
-            color: fg,
-            fontSize: valueOnly ? 22 : 26,
-            letterSpacing: 2,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            shown,
+            style: TextStyle(
+              color: fg,
+              fontSize: (valueOnly ? 22 : 26) * scale,
+              letterSpacing: 2,
+            ),
+            textAlign: TextAlign.center,
+            maxLines: 1,
           ),
-          textAlign: TextAlign.center,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
         ),
       ),
     );
@@ -580,12 +657,14 @@ class _SimpleCell extends StatelessWidget {
   final String label;
   final String value;
   final Color fg;
+  final double scale;
   final VoidCallback onLongPress;
 
   const _SimpleCell({
     required this.label,
     required this.value,
     required this.fg,
+    required this.scale,
     required this.onLongPress,
   });
 
@@ -600,20 +679,23 @@ class _SimpleCell extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(label,
-                style: TextStyle(color: fg, fontSize: 18, letterSpacing: 2)),
+                style: TextStyle(
+                    color: fg, fontSize: 18 * scale, letterSpacing: 2)),
             Expanded(
               child: Center(
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Text(
-                    value,
-                    style: TextStyle(
-                      color: fg,
-                      fontSize: 56,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
+                child: value.isEmpty
+                    ? const SizedBox.shrink()
+                    : FittedBox(
+                        fit: BoxFit.contain,
+                        child: Text(
+                          value,
+                          style: TextStyle(
+                            color: fg,
+                            fontSize: 56,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
               ),
             ),
           ],
@@ -627,6 +709,8 @@ class _BumpCell extends StatelessWidget {
   final String label;
   final String value;
   final Color fg;
+  final Color dimFg;
+  final double scale;
   final VoidCallback onPlus;
   final VoidCallback onMinus;
   final VoidCallback onClear;
@@ -636,6 +720,8 @@ class _BumpCell extends StatelessWidget {
     required this.label,
     required this.value,
     required this.fg,
+    required this.dimFg,
+    required this.scale,
     required this.onPlus,
     required this.onMinus,
     required this.onClear,
@@ -650,33 +736,42 @@ class _BumpCell extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(label,
-              style: TextStyle(color: fg, fontSize: 18, letterSpacing: 2)),
+              style: TextStyle(
+                  color: fg, fontSize: 18 * scale, letterSpacing: 2)),
           Expanded(
             child: GestureDetector(
               onLongPress: onLongPress,
               behavior: HitTestBehavior.opaque,
               child: Center(
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  child: Text(
-                    value,
-                    style: TextStyle(
-                      color: fg,
-                      fontSize: 72,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ),
+                child: value.isEmpty
+                    ? const SizedBox.shrink()
+                    : FittedBox(
+                        fit: BoxFit.contain,
+                        child: Text(
+                          value,
+                          style: TextStyle(
+                            color: fg,
+                            fontSize: 72,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ),
               ),
             ),
           ),
           SizedBox(
-            height: 44,
+            height: 44 * scale,
             child: Row(
               children: [
-                Expanded(child: _BumpButton(symbol: '+', fg: fg, onTap: onPlus)),
-                Expanded(child: _BumpButton(symbol: 'X', fg: fg, onTap: onClear)),
-                Expanded(child: _BumpButton(symbol: '−', fg: fg, onTap: onMinus)),
+                Expanded(
+                    child:
+                        _BumpButton(symbol: '−', fg: dimFg, scale: scale, onTap: onMinus)),
+                Expanded(
+                    child:
+                        _BumpButton(symbol: 'X', fg: dimFg, scale: scale, onTap: onClear)),
+                Expanded(
+                    child:
+                        _BumpButton(symbol: '+', fg: dimFg, scale: scale, onTap: onPlus)),
               ],
             ),
           ),
@@ -689,11 +784,13 @@ class _BumpCell extends StatelessWidget {
 class _BumpButton extends StatelessWidget {
   final String symbol;
   final Color fg;
+  final double scale;
   final VoidCallback onTap;
 
   const _BumpButton({
     required this.symbol,
     required this.fg,
+    required this.scale,
     required this.onTap,
   });
 
@@ -706,7 +803,7 @@ class _BumpButton extends StatelessWidget {
           symbol,
           style: TextStyle(
             color: fg,
-            fontSize: 28,
+            fontSize: 28 * scale,
             fontWeight: FontWeight.bold,
           ),
         ),
@@ -717,10 +814,11 @@ class _BumpButton extends StatelessWidget {
 
 class _VDivider extends StatelessWidget {
   final Color color;
-  const _VDivider({required this.color});
+  final double thickness;
+  const _VDivider({required this.color, required this.thickness});
 
   @override
   Widget build(BuildContext context) {
-    return Container(width: 1, color: color);
+    return Container(width: thickness, color: color);
   }
 }
