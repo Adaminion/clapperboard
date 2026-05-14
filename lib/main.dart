@@ -136,16 +136,27 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
     'XL': 2.0,
   };
 
+  static const int _clapDurationMs = 1000;
+
   ClapData _data = ClapData();
   List<Preset> _presets = [];
   String _textSize = 'M';
-  bool _clapping = false;
+  DateTime? _clapStart;
   DateTime _now = DateTime.now();
   Timer? _clockTimer;
   Timer? _clapTimer;
   SharedPreferences? _prefs;
 
   double get _scale => _textScales[_textSize] ?? 1.0;
+
+  bool get _clapping => _clapStart != null;
+
+  int get _clapRemainingMs {
+    if (_clapStart == null) return 0;
+    final elapsed = DateTime.now().difference(_clapStart!).inMilliseconds;
+    final rem = _clapDurationMs - elapsed;
+    return rem < 0 ? 0 : rem;
+  }
 
   @override
   void initState() {
@@ -201,10 +212,19 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
 
   void _clap() {
     HapticFeedback.heavyImpact();
-    setState(() => _clapping = true);
     _clapTimer?.cancel();
-    _clapTimer = Timer(const Duration(seconds: 1), () {
-      if (mounted) setState(() => _clapping = false);
+    setState(() => _clapStart = DateTime.now());
+    _clapTimer = Timer.periodic(const Duration(milliseconds: 16), (t) {
+      if (!mounted) {
+        t.cancel();
+        return;
+      }
+      if (_clapRemainingMs <= 0) {
+        t.cancel();
+        setState(() => _clapStart = null);
+      } else {
+        setState(() {});
+      }
     });
   }
 
@@ -569,15 +589,30 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                     child: InkWell(
                       onTap: _clap,
                       child: Center(
-                        child: Text(
-                          'CLAP',
-                          style: TextStyle(
-                            color: dimFg,
-                            fontSize: 32 * scale,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 8,
-                          ),
-                        ),
+                        child: _clapping
+                            ? Text(
+                                _clapRemainingMs
+                                    .toString()
+                                    .padLeft(4, '0'),
+                                style: TextStyle(
+                                  color: fg,
+                                  fontSize: 44 * scale,
+                                  fontWeight: FontWeight.bold,
+                                  fontFeatures: const [
+                                    FontFeature.tabularFigures(),
+                                  ],
+                                  letterSpacing: 4,
+                                ),
+                              )
+                            : Text(
+                                'CLAP',
+                                style: TextStyle(
+                                  color: dimFg,
+                                  fontSize: 32 * scale,
+                                  fontWeight: FontWeight.bold,
+                                  letterSpacing: 8,
+                                ),
+                              ),
                       ),
                     ),
                   ),
