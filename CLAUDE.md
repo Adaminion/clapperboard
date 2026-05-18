@@ -1,14 +1,8 @@
-# Clapperboard — Claude project notes
+# Clapperboard
 
-Flutter app. Targets: Android tablets, iPad, web. Solo developer (Adaminion).
+Flutter app. Digital movie clapperboard. Targets: Android tablets, iPad, web.
 
-## Workflow rules — IMPORTANT
-
-- **Never create branches.** Work on `main` only.
-- **Never open pull requests.** This is a solo repo, branches and PRs add zero value.
-- **Never push without explicit user approval.** Make changes locally, let the user test, only push after the user says it's OK.
-- After approval: `git add` → commit → push directly to `origin/main`. Done.
-- Never force-push to `main`. If history needs editing, ask first.
+GitHub: https://github.com/Adaminion/clapperboard
 
 ## Run / build / test
 
@@ -23,23 +17,22 @@ flutter analyze
 
 ## Project conventions
 
-- Single-file UI in `lib/main.dart`. Keep MVP — no premature splitting until pain is real.
+- Single-file UI in `lib/main.dart`. Keep MVP — no premature splitting.
 - Persistence: `SharedPreferences` only. JSON-encode complex values.
-- Landscape locked on mobile (`AndroidManifest.xml`, `Info.plist`). Web is responsive.
-- Colour palette: black background, white text. Inverted (white bg / black text) for the 1-second clap flash.
-- UI chrome (CLAP label, ☰ menu, − X + buttons) is dimmed to alpha 0.45 so the production data dominates.
+- Landscape locked on mobile (`AndroidManifest.xml`, `Info.plist`).
+  Web is responsive.
+- Default palette: black background, white text.
+  Inverted (white bg / black text) during the 1-second clap flash.
+- UI chrome (CLAP label, ☰ menu, bump buttons) is dimmed to alpha 0.45
+  so the production data dominates visually.
 - Bump button order is **− X +** (not + X −).
 - Grid divider thickness: 5 px.
-- All text sizes multiply by `_scale` from the text-size setting (S 0.85 / M 1.0 / L 1.5 / XL 2.0).
+- Text size setting (S 0.85 / M 1.0 / L 1.5 / XL 2.0) multiplies every
+  font size via `_scale`.
 
 ## Don't (without asking)
 
 - Add new packages to `pubspec.yaml`.
 - Break the web build (`flutter build web --release` must keep working).
 - Add platform code for desktop (Windows/macOS/Linux) — not in scope.
-- Add analytics, crash reporting, network calls — this is a fully local app.
-
-## Repo
-
-- GitHub: https://github.com/Adaminion/clapperboard
-- Default branch: `main` (the only branch)
+- Add analytics, crash reporting, or network calls — this app is fully local.
