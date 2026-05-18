@@ -32,14 +32,22 @@ class ClapperboardApp extends StatelessWidget {
   }
 }
 
+// -----------------------------------------------------------------------------
+// Data model
+// -----------------------------------------------------------------------------
+
 class ClapData {
   String title;
   String scene;
   String take;
   String roll;
   String camera;
+  String aperture;
   String fps;
+  String shutter;
+  String lens;
   String sound;
+  String notes;
 
   ClapData({
     this.title = '',
@@ -47,8 +55,12 @@ class ClapData {
     this.take = '1',
     this.roll = '',
     this.camera = '',
+    this.aperture = '',
     this.fps = '',
+    this.shutter = '',
+    this.lens = '',
     this.sound = '',
+    this.notes = '',
   });
 
   Map<String, dynamic> toJson() => {
@@ -57,8 +69,12 @@ class ClapData {
         'take': take,
         'roll': roll,
         'camera': camera,
+        'aperture': aperture,
         'fps': fps,
+        'shutter': shutter,
+        'lens': lens,
         'sound': sound,
+        'notes': notes,
       };
 
   factory ClapData.fromJson(Map<String, dynamic> j) => ClapData(
@@ -67,8 +83,12 @@ class ClapData {
         take: j['take'] ?? '1',
         roll: j['roll'] ?? '',
         camera: j['camera'] ?? '',
+        aperture: j['aperture'] ?? '',
         fps: j['fps'] ?? '',
+        shutter: j['shutter'] ?? '',
+        lens: j['lens'] ?? '',
         sound: j['sound'] ?? '',
+        notes: j['notes'] ?? '',
       );
 }
 
@@ -77,7 +97,10 @@ class Preset {
   final String title;
   final String roll;
   final String camera;
+  final String aperture;
   final String fps;
+  final String shutter;
+  final String lens;
   final String sound;
 
   Preset({
@@ -85,7 +108,10 @@ class Preset {
     required this.title,
     required this.roll,
     required this.camera,
+    required this.aperture,
     required this.fps,
+    required this.shutter,
+    required this.lens,
     required this.sound,
   });
 
@@ -94,7 +120,10 @@ class Preset {
         'title': title,
         'roll': roll,
         'camera': camera,
+        'aperture': aperture,
         'fps': fps,
+        'shutter': shutter,
+        'lens': lens,
         'sound': sound,
       };
 
@@ -103,7 +132,10 @@ class Preset {
         title: j['title'] ?? '',
         roll: j['roll'] ?? '',
         camera: j['camera'] ?? '',
+        aperture: j['aperture'] ?? '',
         fps: j['fps'] ?? '',
+        shutter: j['shutter'] ?? '',
+        lens: j['lens'] ?? '',
         sound: j['sound'] ?? '',
       );
 
@@ -112,10 +144,17 @@ class Preset {
         title: c.title,
         roll: c.roll,
         camera: c.camera,
+        aperture: c.aperture,
         fps: c.fps,
+        shutter: c.shutter,
+        lens: c.lens,
         sound: c.sound,
       );
 }
+
+// -----------------------------------------------------------------------------
+// Main screen
+// -----------------------------------------------------------------------------
 
 class ClapperboardScreen extends StatefulWidget {
   const ClapperboardScreen({super.key});
@@ -128,6 +167,11 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
   static const _kDataKey = 'clap_data';
   static const _kPresetsKey = 'clap_presets';
   static const _kTextSizeKey = 'text_size';
+  static const _kBgColorKey = 'bg_color';
+  static const _kFgColorKey = 'fg_color';
+
+  static const int _clapDurationMs = 1000;
+  static const String _clapCredit = 'Clapboard by Adaminion';
 
   static const Map<String, double> _textScales = {
     'S': 0.85,
@@ -136,16 +180,39 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
     'XL': 2.0,
   };
 
-  static const int _clapDurationMs = 1000;
+  // The swatch palette used by the color picker.
+  static const List<Color> _swatches = [
+    Colors.black,
+    Color(0xFF222222),
+    Color(0xFF555555),
+    Color(0xFF999999),
+    Color(0xFFCCCCCC),
+    Colors.white,
+    Color(0xFFE53935), // red
+    Color(0xFFFB8C00), // orange
+    Color(0xFFFDD835), // yellow
+    Color(0xFF43A047), // green
+    Color(0xFF1E88E5), // blue
+    Color(0xFF8E24AA), // purple
+    Color(0xFFD81B60), // pink
+    Color(0xFF00ACC1), // cyan
+    Color(0xFF6D4C41), // brown
+    Color(0xFFFFB300), // amber
+  ];
 
   ClapData _data = ClapData();
   List<Preset> _presets = [];
   String _textSize = 'M';
+  Color _bgColor = Colors.black;
+  Color _fgColor = Colors.white;
   DateTime? _clapStart;
   DateTime _now = DateTime.now();
   Timer? _clockTimer;
   Timer? _clapTimer;
   SharedPreferences? _prefs;
+  String _buildInfo = '';
+  bool _sceneBumpVisible = false;
+  bool _takeBumpVisible = false;
 
   double get _scale => _textScales[_textSize] ?? 1.0;
 
@@ -162,6 +229,7 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
   void initState() {
     super.initState();
     _load();
+    _loadBuildInfo();
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (mounted) setState(() => _now = DateTime.now());
     });
@@ -173,6 +241,10 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
     _clapTimer?.cancel();
     super.dispose();
   }
+
+  // ---------------------------------------------------------------------------
+  // Persistence
+  // ---------------------------------------------------------------------------
 
   Future<void> _load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -196,6 +268,10 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
     if (savedTextSize != null && _textScales.containsKey(savedTextSize)) {
       _textSize = savedTextSize;
     }
+    final bgVal = prefs.getInt(_kBgColorKey);
+    final fgVal = prefs.getInt(_kFgColorKey);
+    if (bgVal != null) _bgColor = Color(bgVal);
+    if (fgVal != null) _fgColor = Color(fgVal);
     if (mounted) setState(() {});
   }
 
@@ -209,6 +285,32 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
       jsonEncode(_presets.map((p) => p.toJson()).toList()),
     );
   }
+
+  Future<void> _saveColors() async {
+    await _prefs?.setInt(_kBgColorKey, _colorToInt(_bgColor));
+    await _prefs?.setInt(_kFgColorKey, _colorToInt(_fgColor));
+  }
+
+  int _colorToInt(Color c) {
+    return ((c.a * 255).round() & 0xff) << 24 |
+        ((c.r * 255).round() & 0xff) << 16 |
+        ((c.g * 255).round() & 0xff) << 8 |
+        ((c.b * 255).round() & 0xff);
+  }
+
+  Future<void> _loadBuildInfo() async {
+    try {
+      final pubspec = await rootBundle.loadString('pubspec.yaml');
+      final m = RegExp(r'^version:\s*(\S+)', multiLine: true).firstMatch(pubspec);
+      if (m != null && mounted) {
+        setState(() => _buildInfo = m.group(1) ?? '');
+      }
+    } catch (_) {}
+  }
+
+  // ---------------------------------------------------------------------------
+  // Clap
+  // ---------------------------------------------------------------------------
 
   void _clap() {
     HapticFeedback.heavyImpact();
@@ -227,6 +329,10 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
       }
     });
   }
+
+  // ---------------------------------------------------------------------------
+  // Field mutation
+  // ---------------------------------------------------------------------------
 
   void _bumpScene(int delta) {
     setState(() {
@@ -275,7 +381,8 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
           TextButton(
               onPressed: () => Navigator.pop(ctx, controller.text),
               child: const Text('OK')),
@@ -287,6 +394,10 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
       _saveData();
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Menu and dialogs
+  // ---------------------------------------------------------------------------
 
   Future<void> _openMenu() async {
     final action = await showModalBottomSheet<String>(
@@ -308,12 +419,32 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                   style: TextStyle(color: Colors.white)),
               onTap: () => Navigator.pop(ctx, 'load'),
             ),
+            const Divider(color: Colors.white24, height: 1),
             ListTile(
               leading: const Icon(Icons.format_size, color: Colors.white),
               title: Text('Text size: $_textSize',
                   style: const TextStyle(color: Colors.white)),
               onTap: () => Navigator.pop(ctx, 'textsize'),
             ),
+            ListTile(
+              leading: const Icon(Icons.swap_horiz, color: Colors.white),
+              title: const Text('Reverse colors',
+                  style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(ctx, 'reverse'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.format_color_fill, color: Colors.white),
+              title: const Text('Background color',
+                  style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(ctx, 'bg'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.format_color_text, color: Colors.white),
+              title: const Text('Text color',
+                  style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(ctx, 'fg'),
+            ),
+            const Divider(color: Colors.white24, height: 1),
             ListTile(
               leading: const Icon(Icons.refresh, color: Colors.white),
               title: const Text('Reset scene & take to 1',
@@ -325,15 +456,45 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
       ),
     );
     if (!mounted) return;
-    if (action == 'save') await _savePresetDialog();
-    if (action == 'load') await _loadPresetDialog();
-    if (action == 'textsize') await _textSizeDialog();
-    if (action == 'reset') {
-      setState(() {
-        _data.scene = '1';
-        _data.take = '1';
-      });
-      _saveData();
+    switch (action) {
+      case 'save':
+        await _savePresetDialog();
+        break;
+      case 'load':
+        await _loadPresetDialog();
+        break;
+      case 'textsize':
+        await _textSizeDialog();
+        break;
+      case 'reverse':
+        setState(() {
+          final tmp = _bgColor;
+          _bgColor = _fgColor;
+          _fgColor = tmp;
+        });
+        await _saveColors();
+        break;
+      case 'bg':
+        final picked = await _pickColor('Background color', _bgColor);
+        if (picked != null) {
+          setState(() => _bgColor = picked);
+          await _saveColors();
+        }
+        break;
+      case 'fg':
+        final picked = await _pickColor('Text color', _fgColor);
+        if (picked != null) {
+          setState(() => _fgColor = picked);
+          await _saveColors();
+        }
+        break;
+      case 'reset':
+        setState(() {
+          _data.scene = '1';
+          _data.take = '1';
+        });
+        _saveData();
+        break;
     }
   }
 
@@ -370,6 +531,44 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
     }
   }
 
+  Future<Color?> _pickColor(String title, Color current) async {
+    return showDialog<Color>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: SizedBox(
+          width: 360,
+          child: Wrap(
+            spacing: 10,
+            runSpacing: 10,
+            children: _swatches.map((c) {
+              final selected = _colorToInt(c) == _colorToInt(current);
+              return InkWell(
+                onTap: () => Navigator.pop(ctx, c),
+                child: Container(
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    color: c,
+                    border: Border.all(
+                      color: selected ? Colors.blue : Colors.grey.shade400,
+                      width: selected ? 3 : 1,
+                    ),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
+        ],
+      ),
+    );
+  }
+
   Future<void> _savePresetDialog() async {
     final controller = TextEditingController();
     final name = await showDialog<String>(
@@ -384,7 +583,8 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
         ),
         actions: [
           TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
           TextButton(
               onPressed: () => Navigator.pop(ctx, controller.text),
               child: const Text('Save')),
@@ -436,7 +636,10 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
         _data.title = picked.title;
         _data.roll = picked.roll;
         _data.camera = picked.camera;
+        _data.aperture = picked.aperture;
         _data.fps = picked.fps;
+        _data.shutter = picked.shutter;
+        _data.lens = picked.lens;
         _data.sound = picked.sound;
       });
       _saveData();
@@ -449,190 +652,276 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
         '${two(d.hour)}:${two(d.minute)}:${two(d.second)}';
   }
 
+  // ---------------------------------------------------------------------------
+  // Build
+  // ---------------------------------------------------------------------------
+
   @override
   Widget build(BuildContext context) {
-    final bg = _clapping ? Colors.white : Colors.black;
-    final fg = _clapping ? Colors.black : Colors.white;
+    final bg = _clapping ? _fgColor : _bgColor;
+    final fg = _clapping ? _bgColor : _fgColor;
     final dimFg = fg.withValues(alpha: 0.45);
     final divider = fg.withValues(alpha: 0.7);
     final scale = _scale;
     const dividerThickness = 5.0;
 
+    final body = SafeArea(
+      child: Column(
+        children: [
+          _HeaderCell(
+            label: 'TITLE',
+            value: _data.title,
+            fg: fg,
+            divider: divider,
+            dividerThickness: dividerThickness,
+            height: 56 * scale,
+            onLongPress: () =>
+                _editField('TITLE', _data.title, (v) => _data.title = v),
+          ),
+          _HeaderCell(
+            label: 'DATE/TIME',
+            value: _fmtDateTime(_now),
+            fg: fg,
+            divider: divider,
+            dividerThickness: dividerThickness,
+            height: 44 * scale,
+            valueOnly: true,
+          ),
+          // SCENE / TAKE / ROLL row — twice as tall as the lower rows
+          Expanded(
+            flex: 2,
+            child: Row(
+              children: [
+                Expanded(
+                  child: _BumpCell(
+                    label: 'SCENE',
+                    value: _data.scene,
+                    fg: fg,
+                    dimFg: dimFg,
+                    bumpVisible: _sceneBumpVisible,
+                    onTapValue: () => setState(
+                        () => _sceneBumpVisible = !_sceneBumpVisible),
+                    onPlus: () => _bumpScene(1),
+                    onMinus: () => _bumpScene(-1),
+                    onClear: () => _clearField(() => _data.scene = ''),
+                    onLongPress: () => _editField(
+                      'SCENE',
+                      _data.scene,
+                      (v) => _data.scene = v,
+                    ),
+                  ),
+                ),
+                _VDivider(color: divider, thickness: dividerThickness),
+                Expanded(
+                  child: _BumpCell(
+                    label: 'TAKE',
+                    value: _data.take,
+                    fg: fg,
+                    dimFg: dimFg,
+                    bumpVisible: _takeBumpVisible,
+                    onTapValue: () => setState(
+                        () => _takeBumpVisible = !_takeBumpVisible),
+                    onPlus: () => _bumpTake(1),
+                    onMinus: () => _bumpTake(-1),
+                    onClear: () => _clearField(() => _data.take = ''),
+                    onLongPress: () => _editField(
+                      'TAKE',
+                      _data.take,
+                      (v) => _data.take = v,
+                    ),
+                  ),
+                ),
+                _VDivider(color: divider, thickness: dividerThickness),
+                Expanded(
+                  child: _SimpleCell(
+                    label: 'ROLL',
+                    value: _data.roll,
+                    fg: fg,
+                    onLongPress: () => _editField(
+                        'ROLL', _data.roll, (v) => _data.roll = v),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(height: dividerThickness, color: divider),
+          // CAMERA / APERTURE / FPS
+          Expanded(
+            flex: 1,
+            child: Row(
+              children: [
+                Expanded(
+                  child: _SimpleCell(
+                    label: 'CAMERA',
+                    value: _data.camera,
+                    fg: fg,
+                    onLongPress: () => _editField(
+                        'CAMERA', _data.camera, (v) => _data.camera = v),
+                  ),
+                ),
+                _VDivider(color: divider, thickness: dividerThickness),
+                Expanded(
+                  child: _SimpleCell(
+                    label: 'APERTURE',
+                    value: _data.aperture,
+                    fg: fg,
+                    onLongPress: () => _editField(
+                        'APERTURE', _data.aperture, (v) => _data.aperture = v),
+                  ),
+                ),
+                _VDivider(color: divider, thickness: dividerThickness),
+                Expanded(
+                  child: _SimpleCell(
+                    label: 'FPS',
+                    value: _data.fps,
+                    fg: fg,
+                    onLongPress: () => _editField(
+                      'FPS',
+                      _data.fps,
+                      (v) => _data.fps = v,
+                      keyboard:
+                          const TextInputType.numberWithOptions(decimal: true),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(height: dividerThickness, color: divider),
+          // SHUTTER / LENS / SOUND
+          Expanded(
+            flex: 1,
+            child: Row(
+              children: [
+                Expanded(
+                  child: _SimpleCell(
+                    label: 'SHUTTER',
+                    value: _data.shutter,
+                    fg: fg,
+                    onLongPress: () => _editField(
+                        'SHUTTER', _data.shutter, (v) => _data.shutter = v),
+                  ),
+                ),
+                _VDivider(color: divider, thickness: dividerThickness),
+                Expanded(
+                  child: _SimpleCell(
+                    label: 'LENS',
+                    value: _data.lens,
+                    fg: fg,
+                    onLongPress: () =>
+                        _editField('LENS', _data.lens, (v) => _data.lens = v),
+                  ),
+                ),
+                _VDivider(color: divider, thickness: dividerThickness),
+                Expanded(
+                  child: _SimpleCell(
+                    label: 'SOUND',
+                    value: _data.sound,
+                    fg: fg,
+                    onLongPress: () => _editField(
+                        'SOUND', _data.sound, (v) => _data.sound = v),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Container(height: dividerThickness, color: divider),
+          // CLAP bar — double-tall, split CLAP (1/3) / NOTES (2/3) / menu
+          SizedBox(
+            height: 144 * scale,
+            child: Row(
+              children: [
+                Expanded(
+                  flex: 1,
+                  child: InkWell(
+                    onTap: _clap,
+                    child: Center(
+                      child: _clapping
+                          ? Text(
+                              _clapRemainingMs.toString().padLeft(4, '0'),
+                              style: TextStyle(
+                                color: fg,
+                                fontSize: 64 * scale,
+                                fontWeight: FontWeight.bold,
+                                fontFeatures: const [
+                                  FontFeature.tabularFigures(),
+                                ],
+                                letterSpacing: 4,
+                              ),
+                            )
+                          : Text(
+                              'CLAP',
+                              style: TextStyle(
+                                color: dimFg,
+                                fontSize: 48 * scale,
+                                fontWeight: FontWeight.bold,
+                                letterSpacing: 8,
+                              ),
+                            ),
+                    ),
+                  ),
+                ),
+                _VDivider(color: divider, thickness: dividerThickness),
+                Expanded(
+                  flex: 2,
+                  child: _NotesPanel(
+                    notes: _data.notes,
+                    fg: fg,
+                    dimFg: dimFg,
+                    clapping: _clapping,
+                    creditText: _clapCredit,
+                    onLongPress: () => _editField(
+                      'NOTES',
+                      _data.notes,
+                      (v) => _data.notes = v,
+                    ),
+                  ),
+                ),
+                Container(width: dividerThickness, color: divider),
+                SizedBox(
+                  width: 72 * scale,
+                  child: IconButton(
+                    icon: Icon(Icons.menu, color: dimFg, size: 32 * scale),
+                    onPressed: _openMenu,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+
     return Scaffold(
       backgroundColor: bg,
-      body: SafeArea(
-        child: Column(
-          children: [
-            _HeaderCell(
-              label: 'TITLE',
-              value: _data.title,
-              fg: fg,
-              divider: divider,
-              dividerThickness: dividerThickness,
-              height: 56 * scale,
-              scale: scale,
-              onLongPress: () =>
-                  _editField('TITLE', _data.title, (v) => _data.title = v),
-            ),
-            _HeaderCell(
-              label: 'DATE/TIME',
-              value: _fmtDateTime(_now),
-              fg: fg,
-              divider: divider,
-              dividerThickness: dividerThickness,
-              height: 44 * scale,
-              scale: scale,
-              valueOnly: true,
-            ),
-            Expanded(
-              child: Row(
-                children: [
-                  Expanded(
-                    child: _BumpCell(
-                      label: 'SCENE',
-                      value: _data.scene,
-                      fg: fg,
-                      dimFg: dimFg,
-                      scale: scale,
-                      onPlus: () => _bumpScene(1),
-                      onMinus: () => _bumpScene(-1),
-                      onClear: () => _clearField(() => _data.scene = ''),
-                      onLongPress: () => _editField(
-                        'SCENE',
-                        _data.scene,
-                        (v) => _data.scene = v,
-                      ),
-                    ),
+      body: Stack(
+        children: [
+          body,
+          // Tiny build-number overlay in the bottom-right corner.
+          if (_buildInfo.isNotEmpty)
+            Positioned(
+              right: 4,
+              bottom: 2,
+              child: IgnorePointer(
+                child: Text(
+                  'v$_buildInfo',
+                  style: TextStyle(
+                    color: dimFg.withValues(alpha: 0.5),
+                    fontSize: 9,
+                    fontFeatures: const [FontFeature.tabularFigures()],
                   ),
-                  _VDivider(color: divider, thickness: dividerThickness),
-                  Expanded(
-                    child: _BumpCell(
-                      label: 'TAKE',
-                      value: _data.take,
-                      fg: fg,
-                      dimFg: dimFg,
-                      scale: scale,
-                      onPlus: () => _bumpTake(1),
-                      onMinus: () => _bumpTake(-1),
-                      onClear: () => _clearField(() => _data.take = ''),
-                      onLongPress: () => _editField(
-                        'TAKE',
-                        _data.take,
-                        (v) => _data.take = v,
-                      ),
-                    ),
-                  ),
-                  _VDivider(color: divider, thickness: dividerThickness),
-                  Expanded(
-                    child: _SimpleCell(
-                      label: 'ROLL',
-                      value: _data.roll,
-                      fg: fg,
-                      scale: scale,
-                      onLongPress: () => _editField(
-                          'ROLL', _data.roll, (v) => _data.roll = v),
-                    ),
-                  ),
-                ],
+                ),
               ),
             ),
-            Container(height: dividerThickness, color: divider),
-            Expanded(
-              child: Row(
-                children: [
-                  Expanded(
-                    child: _SimpleCell(
-                      label: 'CAMERA',
-                      value: _data.camera,
-                      fg: fg,
-                      scale: scale,
-                      onLongPress: () => _editField(
-                          'CAMERA', _data.camera, (v) => _data.camera = v),
-                    ),
-                  ),
-                  _VDivider(color: divider, thickness: dividerThickness),
-                  Expanded(
-                    child: _SimpleCell(
-                      label: 'FPS',
-                      value: _data.fps,
-                      fg: fg,
-                      scale: scale,
-                      onLongPress: () => _editField(
-                        'FPS',
-                        _data.fps,
-                        (v) => _data.fps = v,
-                        keyboard:
-                            const TextInputType.numberWithOptions(decimal: true),
-                      ),
-                    ),
-                  ),
-                  _VDivider(color: divider, thickness: dividerThickness),
-                  Expanded(
-                    child: _SimpleCell(
-                      label: 'SOUND',
-                      value: _data.sound,
-                      fg: fg,
-                      scale: scale,
-                      onLongPress: () => _editField(
-                          'SOUND', _data.sound, (v) => _data.sound = v),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-            Container(height: dividerThickness, color: divider),
-            SizedBox(
-              height: 72 * scale,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: InkWell(
-                      onTap: _clap,
-                      child: Center(
-                        child: _clapping
-                            ? Text(
-                                _clapRemainingMs
-                                    .toString()
-                                    .padLeft(4, '0'),
-                                style: TextStyle(
-                                  color: fg,
-                                  fontSize: 44 * scale,
-                                  fontWeight: FontWeight.bold,
-                                  fontFeatures: const [
-                                    FontFeature.tabularFigures(),
-                                  ],
-                                  letterSpacing: 4,
-                                ),
-                              )
-                            : Text(
-                                'CLAP',
-                                style: TextStyle(
-                                  color: dimFg,
-                                  fontSize: 32 * scale,
-                                  fontWeight: FontWeight.bold,
-                                  letterSpacing: 8,
-                                ),
-                              ),
-                      ),
-                    ),
-                  ),
-                  Container(width: dividerThickness, color: divider),
-                  SizedBox(
-                    width: 72 * scale,
-                    child: IconButton(
-                      icon: Icon(Icons.menu, color: dimFg, size: 32 * scale),
-                      onPressed: _openMenu,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
+        ],
       ),
     );
   }
 }
+
+// -----------------------------------------------------------------------------
+// Cells
+// -----------------------------------------------------------------------------
 
 class _HeaderCell extends StatelessWidget {
   final String label;
@@ -641,7 +930,6 @@ class _HeaderCell extends StatelessWidget {
   final Color divider;
   final double dividerThickness;
   final double height;
-  final double scale;
   final bool valueOnly;
   final VoidCallback? onLongPress;
 
@@ -652,7 +940,6 @@ class _HeaderCell extends StatelessWidget {
     required this.divider,
     required this.dividerThickness,
     required this.height,
-    required this.scale,
     this.valueOnly = false,
     this.onLongPress,
   });
@@ -670,16 +957,17 @@ class _HeaderCell extends StatelessWidget {
               bottom: BorderSide(color: divider, width: dividerThickness)),
         ),
         alignment: Alignment.center,
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
         child: FittedBox(
           fit: BoxFit.scaleDown,
           child: Text(
             shown,
             style: TextStyle(
               color: fg,
-              fontSize: (valueOnly ? 22 : 26) * scale,
+              fontSize: height * 0.55,
               letterSpacing: 2,
+              fontWeight: valueOnly ? FontWeight.w500 : FontWeight.w600,
             ),
-            textAlign: TextAlign.center,
             maxLines: 1,
           ),
         ),
@@ -692,50 +980,67 @@ class _SimpleCell extends StatelessWidget {
   final String label;
   final String value;
   final Color fg;
-  final double scale;
   final VoidCallback onLongPress;
 
   const _SimpleCell({
     required this.label,
     required this.value,
     required this.fg,
-    required this.scale,
     required this.onLongPress,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onLongPress: onLongPress,
-      behavior: HitTestBehavior.opaque,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(label,
-                style: TextStyle(
-                    color: fg, fontSize: 18 * scale, letterSpacing: 2)),
-            Expanded(
-              child: Center(
-                child: value.isEmpty
-                    ? const SizedBox.shrink()
-                    : FittedBox(
-                        fit: BoxFit.contain,
-                        child: Text(
-                          value,
-                          style: TextStyle(
-                            color: fg,
-                            fontSize: 56,
-                            fontWeight: FontWeight.w600,
-                          ),
-                        ),
+    return LayoutBuilder(
+      builder: (context, c) {
+        final h = c.maxHeight;
+        final labelH = h * 0.27;
+        return GestureDetector(
+          onLongPress: onLongPress,
+          behavior: HitTestBehavior.opaque,
+          child: Padding(
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SizedBox(
+                  height: labelH,
+                  child: FittedBox(
+                    fit: BoxFit.scaleDown,
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      label,
+                      style: TextStyle(
+                        color: fg,
+                        fontSize: labelH * 0.7,
+                        letterSpacing: 2,
+                        fontWeight: FontWeight.w500,
                       ),
-              ),
+                    ),
+                  ),
+                ),
+                Expanded(
+                  child: Center(
+                    child: value.isEmpty
+                        ? const SizedBox.shrink()
+                        : FittedBox(
+                            fit: BoxFit.contain,
+                            child: Text(
+                              value,
+                              style: TextStyle(
+                                color: fg,
+                                fontSize: 100,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
+                          ),
+                  ),
+                ),
+              ],
             ),
-          ],
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 }
@@ -745,7 +1050,8 @@ class _BumpCell extends StatelessWidget {
   final String value;
   final Color fg;
   final Color dimFg;
-  final double scale;
+  final bool bumpVisible;
+  final VoidCallback onTapValue;
   final VoidCallback onPlus;
   final VoidCallback onMinus;
   final VoidCallback onClear;
@@ -756,7 +1062,8 @@ class _BumpCell extends StatelessWidget {
     required this.value,
     required this.fg,
     required this.dimFg,
-    required this.scale,
+    required this.bumpVisible,
+    required this.onTapValue,
     required this.onPlus,
     required this.onMinus,
     required this.onClear,
@@ -765,53 +1072,90 @@ class _BumpCell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(12),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text(label,
-              style: TextStyle(
-                  color: fg, fontSize: 18 * scale, letterSpacing: 2)),
-          Expanded(
-            child: GestureDetector(
-              onLongPress: onLongPress,
-              behavior: HitTestBehavior.opaque,
-              child: Center(
-                child: value.isEmpty
-                    ? const SizedBox.shrink()
-                    : FittedBox(
-                        fit: BoxFit.contain,
-                        child: Text(
-                          value,
-                          style: TextStyle(
-                            color: fg,
-                            fontSize: 72,
-                            fontWeight: FontWeight.w600,
+    return LayoutBuilder(
+      builder: (context, c) {
+        final h = c.maxHeight;
+        final labelH = h * 0.22;
+        final bumpH = bumpVisible ? h * 0.18 : 0.0;
+        return Padding(
+          padding: const EdgeInsets.all(10),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SizedBox(
+                height: labelH,
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      color: fg,
+                      fontSize: labelH * 0.7,
+                      letterSpacing: 2,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: GestureDetector(
+                  onTap: onTapValue,
+                  onLongPress: onLongPress,
+                  behavior: HitTestBehavior.opaque,
+                  child: Center(
+                    child: value.isEmpty
+                        ? const SizedBox.shrink()
+                        : FittedBox(
+                            fit: BoxFit.contain,
+                            child: Text(
+                              value,
+                              style: TextStyle(
+                                color: fg,
+                                fontSize: 120,
+                                fontWeight: FontWeight.w600,
+                              ),
+                            ),
                           ),
+                  ),
+                ),
+              ),
+              if (bumpVisible)
+                SizedBox(
+                  height: bumpH,
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: _BumpButton(
+                          symbol: '−',
+                          fg: dimFg,
+                          size: bumpH * 0.75,
+                          onTap: onMinus,
                         ),
                       ),
-              ),
-            ),
+                      Expanded(
+                        child: _BumpButton(
+                          symbol: 'X',
+                          fg: dimFg,
+                          size: bumpH * 0.6,
+                          onTap: onClear,
+                        ),
+                      ),
+                      Expanded(
+                        child: _BumpButton(
+                          symbol: '+',
+                          fg: dimFg,
+                          size: bumpH * 0.75,
+                          onTap: onPlus,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+            ],
           ),
-          SizedBox(
-            height: 44 * scale,
-            child: Row(
-              children: [
-                Expanded(
-                    child:
-                        _BumpButton(symbol: '−', fg: dimFg, scale: scale, onTap: onMinus)),
-                Expanded(
-                    child:
-                        _BumpButton(symbol: 'X', fg: dimFg, scale: scale, onTap: onClear)),
-                Expanded(
-                    child:
-                        _BumpButton(symbol: '+', fg: dimFg, scale: scale, onTap: onPlus)),
-              ],
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
@@ -819,13 +1163,13 @@ class _BumpCell extends StatelessWidget {
 class _BumpButton extends StatelessWidget {
   final String symbol;
   final Color fg;
-  final double scale;
+  final double size;
   final VoidCallback onTap;
 
   const _BumpButton({
     required this.symbol,
     required this.fg,
-    required this.scale,
+    required this.size,
     required this.onTap,
   });
 
@@ -838,9 +1182,73 @@ class _BumpButton extends StatelessWidget {
           symbol,
           style: TextStyle(
             color: fg,
-            fontSize: 28 * scale,
+            fontSize: size,
             fontWeight: FontWeight.bold,
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _NotesPanel extends StatelessWidget {
+  final String notes;
+  final Color fg;
+  final Color dimFg;
+  final bool clapping;
+  final String creditText;
+  final VoidCallback onLongPress;
+
+  const _NotesPanel({
+    required this.notes,
+    required this.fg,
+    required this.dimFg,
+    required this.clapping,
+    required this.creditText,
+    required this.onLongPress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onLongPress: onLongPress,
+      behavior: HitTestBehavior.opaque,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Center(
+          child: clapping
+              ? FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    creditText,
+                    style: TextStyle(
+                      color: fg,
+                      fontSize: 36,
+                      fontStyle: FontStyle.italic,
+                      letterSpacing: 1,
+                    ),
+                  ),
+                )
+              : (notes.isEmpty
+                  ? Text(
+                      '— notes —',
+                      style: TextStyle(
+                        color: dimFg.withValues(alpha: 0.5),
+                        fontSize: 20,
+                        fontStyle: FontStyle.italic,
+                      ),
+                    )
+                  : FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        notes,
+                        style: TextStyle(
+                          color: fg,
+                          fontSize: 28,
+                        ),
+                        textAlign: TextAlign.center,
+                      ),
+                    )),
         ),
       ),
     );

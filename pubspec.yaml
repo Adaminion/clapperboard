@@ -2,7 +2,7 @@ name: clapperboard
 description: "Digital movie clapperboard for Android and iPad."
 publish_to: 'none'
 
-version: 1.0.0+1
+version: 0.0.1+2
 
 environment:
   sdk: ^3.11.0
@@ -23,6 +23,7 @@ flutter:
   uses-material-design: true
   assets:
     - assets/icon/
+    - pubspec.yaml
 
 flutter_launcher_icons:
   android: "launcher_icon"

@@ -7,12 +7,12 @@ A simple digital movie clapperboard for Android tablets and iPad, built with Flu
 ## Features
 
 - **Classic layout**: TITLE, DATE/TIME (auto), SCENE, TAKE, ROLL, CAMERA, FPS, SOUND.
-- **CLAP button**: tap to invert screen colours for one second (black ↔ white) with haptic feedback. Use it as a visual sync slate.
+- **CLAP button**: tap to invert screen colors for one second (black ↔ white) with haptic feedback. Use it as a visual sync slate.
 - **Quick scene/take controls**: `+` increments, `−` decrements (never below 0), `X` clears.
 - **Long-press any field** to edit its value with the keyboard.
 - **Presets**: save & load the production-static fields (TITLE, ROLL, CAMERA, FPS, SOUND) so you can switch setups in one tap.
 - **Local persistence**: every change is saved immediately to local storage (`SharedPreferences`).
-- **Landscape locked**: optimised for tablet use.
+- **Landscape locked**: optimized for tablet use.
 
 ## Gestures
 
