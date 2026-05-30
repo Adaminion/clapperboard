@@ -169,8 +169,10 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
   static const _kTextSizeKey = 'text_size';
   static const _kBgColorKey = 'bg_color';
   static const _kFgColorKey = 'fg_color';
+  static const _kHistoryKey = 'clap_history';
 
   static const int _clapDurationMs = 1000;
+  static const int _maxHistory = 5;
   static const String _clapCredit = 'Clapboard by Adaminion';
 
   static const Map<String, double> _textScales = {
@@ -202,6 +204,7 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
 
   ClapData _data = ClapData();
   List<Preset> _presets = [];
+  Map<String, List<String>> _history = {};
   String _textSize = 'M';
   Color _bgColor = Colors.black;
   Color _fgColor = Colors.white;
@@ -211,8 +214,6 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
   Timer? _clapTimer;
   SharedPreferences? _prefs;
   String _buildInfo = '';
-  bool _sceneBumpVisible = false;
-  bool _takeBumpVisible = false;
 
   double get _scale => _textScales[_textSize] ?? 1.0;
 
@@ -272,6 +273,16 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
     final fgVal = prefs.getInt(_kFgColorKey);
     if (bgVal != null) _bgColor = Color(bgVal);
     if (fgVal != null) _fgColor = Color(fgVal);
+    final historyRaw = prefs.getString(_kHistoryKey);
+    if (historyRaw != null) {
+      try {
+        final m = jsonDecode(historyRaw) as Map<String, dynamic>;
+        _history = m.map((k, v) => MapEntry(
+              k,
+              (v as List).map((e) => e.toString()).toList(),
+            ));
+      } catch (_) {}
+    }
     if (mounted) setState(() {});
   }
 
@@ -289,6 +300,25 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
   Future<void> _saveColors() async {
     await _prefs?.setInt(_kBgColorKey, _colorToInt(_bgColor));
     await _prefs?.setInt(_kFgColorKey, _colorToInt(_fgColor));
+  }
+
+  Future<void> _saveHistory() async {
+    await _prefs?.setString(_kHistoryKey, jsonEncode(_history));
+  }
+
+  // Push a value to the front of [field]'s history. Empty values are ignored;
+  // duplicates are moved to the front; the list is capped at [_maxHistory].
+  void _pushHistory(String field, String value) {
+    final v = value.trim();
+    if (v.isEmpty) return;
+    final list = List<String>.from(_history[field] ?? const <String>[]);
+    list.remove(v);
+    list.insert(0, v);
+    while (list.length > _maxHistory) {
+      list.removeLast();
+    }
+    _history[field] = list;
+    _saveHistory();
   }
 
   int _colorToInt(Color c) {
@@ -355,18 +385,68 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
     return (next < 0 ? 0 : next).toString();
   }
 
-  void _clearField(void Function() mutate) {
+  // Clear used by SCENE/TAKE X: push current to history (if any), then clear.
+  void _clearWithHistory(String field, String current, void Function() mutate) {
+    if (current.isNotEmpty) _pushHistory(field, current);
     setState(mutate);
     _saveData();
   }
 
-  Future<void> _editField(
+  // Tap on a cell — show the saved history of that field as a popup menu
+  // anchored to the cell's bottom-left. Selecting an entry sets the field's
+  // value and moves that entry back to the top of the history. No-op if the
+  // history is empty.
+  Future<void> _showHistoryMenuAt(
+    BuildContext cellContext,
+    String field,
+    void Function(String) onSet,
+  ) async {
+    final history = _history[field] ?? const <String>[];
+    if (history.isEmpty) return;
+    final RenderBox box = cellContext.findRenderObject() as RenderBox;
+    final RenderBox overlay =
+        Overlay.of(cellContext).context.findRenderObject() as RenderBox;
+    final topLeft = box.localToGlobal(Offset.zero, ancestor: overlay);
+    final bottomRight = box.localToGlobal(
+      box.size.bottomRight(Offset.zero),
+      ancestor: overlay,
+    );
+    final selected = await showMenu<String>(
+      context: cellContext,
+      position: RelativeRect.fromLTRB(
+        topLeft.dx,
+        bottomRight.dy,
+        overlay.size.width - bottomRight.dx,
+        overlay.size.height - bottomRight.dy,
+      ),
+      items: history
+          .map((h) => PopupMenuItem<String>(
+                value: h,
+                child: Text(h),
+              ))
+          .toList(),
+    );
+    if (selected != null) {
+      setState(() => onSet(selected));
+      _pushHistory(field, selected);
+      _saveData();
+    }
+  }
+
+  // Long-press on a cell — push the current value to history (so it can be
+  // recalled later), then open an *empty* edit dialog for fresh input. On OK,
+  // also push the new value to history.
+  Future<void> _longPressEdit(
     String label,
+    String field,
     String current,
     void Function(String) onSet, {
     TextInputType keyboard = TextInputType.text,
   }) async {
-    final controller = TextEditingController(text: current);
+    if (current.trim().isNotEmpty) {
+      _pushHistory(field, current);
+    }
+    final controller = TextEditingController();
     final value = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -391,6 +471,9 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
     );
     if (value != null) {
       setState(() => onSet(value));
+      if (value.trim().isNotEmpty) {
+        _pushHistory(field, value);
+      }
       _saveData();
     }
   }
@@ -675,8 +758,10 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
             divider: divider,
             dividerThickness: dividerThickness,
             height: 56 * scale,
-            onLongPress: () =>
-                _editField('TITLE', _data.title, (v) => _data.title = v),
+            onTap: (ctx) => _showHistoryMenuAt(
+                ctx, 'title', (v) => _data.title = v),
+            onLongPress: () => _longPressEdit(
+                'TITLE', 'title', _data.title, (v) => _data.title = v),
           ),
           _HeaderCell(
             label: 'DATE/TIME',
@@ -698,17 +783,15 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                     value: _data.scene,
                     fg: fg,
                     dimFg: dimFg,
-                    bumpVisible: _sceneBumpVisible,
-                    onTapValue: () => setState(
-                        () => _sceneBumpVisible = !_sceneBumpVisible),
+                    onTap: (ctx) => _showHistoryMenuAt(
+                        ctx, 'scene', (v) => _data.scene = v),
                     onPlus: () => _bumpScene(1),
                     onMinus: () => _bumpScene(-1),
-                    onClear: () => _clearField(() => _data.scene = ''),
-                    onLongPress: () => _editField(
-                      'SCENE',
-                      _data.scene,
-                      (v) => _data.scene = v,
-                    ),
+                    onClear: () => _clearWithHistory(
+                        'scene', _data.scene, () => _data.scene = ''),
+                    onLongPress: () => _longPressEdit(
+                        'SCENE', 'scene', _data.scene,
+                        (v) => _data.scene = v),
                   ),
                 ),
                 _VDivider(color: divider, thickness: dividerThickness),
@@ -718,17 +801,15 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                     value: _data.take,
                     fg: fg,
                     dimFg: dimFg,
-                    bumpVisible: _takeBumpVisible,
-                    onTapValue: () => setState(
-                        () => _takeBumpVisible = !_takeBumpVisible),
+                    onTap: (ctx) => _showHistoryMenuAt(
+                        ctx, 'take', (v) => _data.take = v),
                     onPlus: () => _bumpTake(1),
                     onMinus: () => _bumpTake(-1),
-                    onClear: () => _clearField(() => _data.take = ''),
-                    onLongPress: () => _editField(
-                      'TAKE',
-                      _data.take,
-                      (v) => _data.take = v,
-                    ),
+                    onClear: () => _clearWithHistory(
+                        'take', _data.take, () => _data.take = ''),
+                    onLongPress: () => _longPressEdit(
+                        'TAKE', 'take', _data.take,
+                        (v) => _data.take = v),
                   ),
                 ),
                 _VDivider(color: divider, thickness: dividerThickness),
@@ -737,8 +818,11 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                     label: 'ROLL',
                     value: _data.roll,
                     fg: fg,
-                    onLongPress: () => _editField(
-                        'ROLL', _data.roll, (v) => _data.roll = v),
+                    onTap: (ctx) => _showHistoryMenuAt(
+                        ctx, 'roll', (v) => _data.roll = v),
+                    onLongPress: () => _longPressEdit(
+                        'ROLL', 'roll', _data.roll,
+                        (v) => _data.roll = v),
                   ),
                 ),
               ],
@@ -755,8 +839,11 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                     label: 'CAMERA',
                     value: _data.camera,
                     fg: fg,
-                    onLongPress: () => _editField(
-                        'CAMERA', _data.camera, (v) => _data.camera = v),
+                    onTap: (ctx) => _showHistoryMenuAt(
+                        ctx, 'camera', (v) => _data.camera = v),
+                    onLongPress: () => _longPressEdit(
+                        'CAMERA', 'camera', _data.camera,
+                        (v) => _data.camera = v),
                   ),
                 ),
                 _VDivider(color: divider, thickness: dividerThickness),
@@ -765,8 +852,11 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                     label: 'APERTURE',
                     value: _data.aperture,
                     fg: fg,
-                    onLongPress: () => _editField(
-                        'APERTURE', _data.aperture, (v) => _data.aperture = v),
+                    onTap: (ctx) => _showHistoryMenuAt(
+                        ctx, 'aperture', (v) => _data.aperture = v),
+                    onLongPress: () => _longPressEdit(
+                        'APERTURE', 'aperture', _data.aperture,
+                        (v) => _data.aperture = v),
                   ),
                 ),
                 _VDivider(color: divider, thickness: dividerThickness),
@@ -775,8 +865,11 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                     label: 'FPS',
                     value: _data.fps,
                     fg: fg,
-                    onLongPress: () => _editField(
+                    onTap: (ctx) => _showHistoryMenuAt(
+                        ctx, 'fps', (v) => _data.fps = v),
+                    onLongPress: () => _longPressEdit(
                       'FPS',
+                      'fps',
                       _data.fps,
                       (v) => _data.fps = v,
                       keyboard:
@@ -798,8 +891,11 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                     label: 'SHUTTER',
                     value: _data.shutter,
                     fg: fg,
-                    onLongPress: () => _editField(
-                        'SHUTTER', _data.shutter, (v) => _data.shutter = v),
+                    onTap: (ctx) => _showHistoryMenuAt(
+                        ctx, 'shutter', (v) => _data.shutter = v),
+                    onLongPress: () => _longPressEdit(
+                        'SHUTTER', 'shutter', _data.shutter,
+                        (v) => _data.shutter = v),
                   ),
                 ),
                 _VDivider(color: divider, thickness: dividerThickness),
@@ -808,8 +904,11 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                     label: 'LENS',
                     value: _data.lens,
                     fg: fg,
-                    onLongPress: () =>
-                        _editField('LENS', _data.lens, (v) => _data.lens = v),
+                    onTap: (ctx) => _showHistoryMenuAt(
+                        ctx, 'lens', (v) => _data.lens = v),
+                    onLongPress: () => _longPressEdit(
+                        'LENS', 'lens', _data.lens,
+                        (v) => _data.lens = v),
                   ),
                 ),
                 _VDivider(color: divider, thickness: dividerThickness),
@@ -818,8 +917,11 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                     label: 'SOUND',
                     value: _data.sound,
                     fg: fg,
-                    onLongPress: () => _editField(
-                        'SOUND', _data.sound, (v) => _data.sound = v),
+                    onTap: (ctx) => _showHistoryMenuAt(
+                        ctx, 'sound', (v) => _data.sound = v),
+                    onLongPress: () => _longPressEdit(
+                        'SOUND', 'sound', _data.sound,
+                        (v) => _data.sound = v),
                   ),
                 ),
               ],
@@ -870,11 +972,11 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                     dimFg: dimFg,
                     clapping: _clapping,
                     creditText: _clapCredit,
-                    onLongPress: () => _editField(
-                      'NOTES',
-                      _data.notes,
-                      (v) => _data.notes = v,
-                    ),
+                    onTap: (ctx) => _showHistoryMenuAt(
+                        ctx, 'notes', (v) => _data.notes = v),
+                    onLongPress: () => _longPressEdit(
+                        'NOTES', 'notes', _data.notes,
+                        (v) => _data.notes = v),
                   ),
                 ),
                 Container(width: dividerThickness, color: divider),
@@ -931,6 +1033,7 @@ class _HeaderCell extends StatelessWidget {
   final double dividerThickness;
   final double height;
   final bool valueOnly;
+  final void Function(BuildContext)? onTap;
   final VoidCallback? onLongPress;
 
   const _HeaderCell({
@@ -941,38 +1044,42 @@ class _HeaderCell extends StatelessWidget {
     required this.dividerThickness,
     required this.height,
     this.valueOnly = false,
+    this.onTap,
     this.onLongPress,
   });
 
   @override
   Widget build(BuildContext context) {
     final shown = valueOnly ? value : (value.isEmpty ? label : value);
-    return GestureDetector(
-      onLongPress: onLongPress,
-      behavior: HitTestBehavior.opaque,
-      child: Container(
-        height: height,
-        decoration: BoxDecoration(
-          border: Border(
-              bottom: BorderSide(color: divider, width: dividerThickness)),
-        ),
-        alignment: Alignment.center,
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-        child: FittedBox(
-          fit: BoxFit.scaleDown,
-          child: Text(
-            shown,
-            style: TextStyle(
-              color: fg,
-              fontSize: height * 0.55,
-              letterSpacing: 2,
-              fontWeight: valueOnly ? FontWeight.w500 : FontWeight.w600,
+    return Builder(builder: (ctx) {
+      return GestureDetector(
+        onTap: onTap == null ? null : () => onTap!(ctx),
+        onLongPress: onLongPress,
+        behavior: HitTestBehavior.opaque,
+        child: Container(
+          height: height,
+          decoration: BoxDecoration(
+            border: Border(
+                bottom: BorderSide(color: divider, width: dividerThickness)),
+          ),
+          alignment: Alignment.center,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+          child: FittedBox(
+            fit: BoxFit.scaleDown,
+            child: Text(
+              shown,
+              style: TextStyle(
+                color: fg,
+                fontSize: height * 0.55,
+                letterSpacing: 2,
+                fontWeight: valueOnly ? FontWeight.w500 : FontWeight.w600,
+              ),
+              maxLines: 1,
             ),
-            maxLines: 1,
           ),
         ),
-      ),
-    );
+      );
+    });
   }
 }
 
@@ -980,25 +1087,108 @@ class _SimpleCell extends StatelessWidget {
   final String label;
   final String value;
   final Color fg;
+  final void Function(BuildContext) onTap;
   final VoidCallback onLongPress;
 
   const _SimpleCell({
     required this.label,
     required this.value,
     required this.fg,
+    required this.onTap,
     required this.onLongPress,
   });
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, c) {
-        final h = c.maxHeight;
-        final labelH = h * 0.27;
-        return GestureDetector(
-          onLongPress: onLongPress,
-          behavior: HitTestBehavior.opaque,
-          child: Padding(
+    return Builder(builder: (ctx) {
+      return LayoutBuilder(
+        builder: (_, c) {
+          final h = c.maxHeight;
+          final labelH = h * 0.27;
+          return GestureDetector(
+            onTap: () => onTap(ctx),
+            onLongPress: onLongPress,
+            behavior: HitTestBehavior.opaque,
+            child: Padding(
+              padding: const EdgeInsets.all(10),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  SizedBox(
+                    height: labelH,
+                    child: FittedBox(
+                      fit: BoxFit.scaleDown,
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        label,
+                        style: TextStyle(
+                          color: fg,
+                          fontSize: labelH * 0.7,
+                          letterSpacing: 2,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: Center(
+                      child: value.isEmpty
+                          ? const SizedBox.shrink()
+                          : FittedBox(
+                              fit: BoxFit.contain,
+                              child: Text(
+                                value,
+                                style: TextStyle(
+                                  color: fg,
+                                  fontSize: 100,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+      );
+    });
+  }
+}
+
+class _BumpCell extends StatelessWidget {
+  final String label;
+  final String value;
+  final Color fg;
+  final Color dimFg;
+  final void Function(BuildContext) onTap;
+  final VoidCallback onPlus;
+  final VoidCallback onMinus;
+  final VoidCallback onClear;
+  final VoidCallback onLongPress;
+
+  const _BumpCell({
+    required this.label,
+    required this.value,
+    required this.fg,
+    required this.dimFg,
+    required this.onTap,
+    required this.onPlus,
+    required this.onMinus,
+    required this.onClear,
+    required this.onLongPress,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Builder(builder: (ctx) {
+      return LayoutBuilder(
+        builder: (_, c) {
+          final h = c.maxHeight;
+          final labelH = h * 0.22;
+          final bumpH = h * 0.18;
+          return Padding(
             padding: const EdgeInsets.all(10),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1020,107 +1210,27 @@ class _SimpleCell extends StatelessWidget {
                   ),
                 ),
                 Expanded(
-                  child: Center(
-                    child: value.isEmpty
-                        ? const SizedBox.shrink()
-                        : FittedBox(
-                            fit: BoxFit.contain,
-                            child: Text(
-                              value,
-                              style: TextStyle(
-                                color: fg,
-                                fontSize: 100,
-                                fontWeight: FontWeight.w600,
+                  child: GestureDetector(
+                    onTap: () => onTap(ctx),
+                    onLongPress: onLongPress,
+                    behavior: HitTestBehavior.opaque,
+                    child: Center(
+                      child: value.isEmpty
+                          ? const SizedBox.shrink()
+                          : FittedBox(
+                              fit: BoxFit.contain,
+                              child: Text(
+                                value,
+                                style: TextStyle(
+                                  color: fg,
+                                  fontSize: 120,
+                                  fontWeight: FontWeight.w600,
+                                ),
                               ),
                             ),
-                          ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _BumpCell extends StatelessWidget {
-  final String label;
-  final String value;
-  final Color fg;
-  final Color dimFg;
-  final bool bumpVisible;
-  final VoidCallback onTapValue;
-  final VoidCallback onPlus;
-  final VoidCallback onMinus;
-  final VoidCallback onClear;
-  final VoidCallback onLongPress;
-
-  const _BumpCell({
-    required this.label,
-    required this.value,
-    required this.fg,
-    required this.dimFg,
-    required this.bumpVisible,
-    required this.onTapValue,
-    required this.onPlus,
-    required this.onMinus,
-    required this.onClear,
-    required this.onLongPress,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, c) {
-        final h = c.maxHeight;
-        final labelH = h * 0.22;
-        final bumpH = bumpVisible ? h * 0.18 : 0.0;
-        return Padding(
-          padding: const EdgeInsets.all(10),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              SizedBox(
-                height: labelH,
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerLeft,
-                  child: Text(
-                    label,
-                    style: TextStyle(
-                      color: fg,
-                      fontSize: labelH * 0.7,
-                      letterSpacing: 2,
-                      fontWeight: FontWeight.w500,
                     ),
                   ),
                 ),
-              ),
-              Expanded(
-                child: GestureDetector(
-                  onTap: onTapValue,
-                  onLongPress: onLongPress,
-                  behavior: HitTestBehavior.opaque,
-                  child: Center(
-                    child: value.isEmpty
-                        ? const SizedBox.shrink()
-                        : FittedBox(
-                            fit: BoxFit.contain,
-                            child: Text(
-                              value,
-                              style: TextStyle(
-                                color: fg,
-                                fontSize: 120,
-                                fontWeight: FontWeight.w600,
-                              ),
-                            ),
-                          ),
-                  ),
-                ),
-              ),
-              if (bumpVisible)
                 SizedBox(
                   height: bumpH,
                   child: Row(
@@ -1152,11 +1262,12 @@ class _BumpCell extends StatelessWidget {
                     ],
                   ),
                 ),
-            ],
-          ),
-        );
-      },
-    );
+              ],
+            ),
+          );
+        },
+      );
+    });
   }
 }
 
@@ -1197,6 +1308,7 @@ class _NotesPanel extends StatelessWidget {
   final Color dimFg;
   final bool clapping;
   final String creditText;
+  final void Function(BuildContext) onTap;
   final VoidCallback onLongPress;
 
   const _NotesPanel({
@@ -1205,15 +1317,18 @@ class _NotesPanel extends StatelessWidget {
     required this.dimFg,
     required this.clapping,
     required this.creditText,
+    required this.onTap,
     required this.onLongPress,
   });
 
   @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onLongPress: onLongPress,
-      behavior: HitTestBehavior.opaque,
-      child: Padding(
+    return Builder(builder: (ctx) {
+      return GestureDetector(
+        onTap: () => onTap(ctx),
+        onLongPress: onLongPress,
+        behavior: HitTestBehavior.opaque,
+        child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
         child: Center(
           child: clapping
@@ -1249,9 +1364,10 @@ class _NotesPanel extends StatelessWidget {
                         textAlign: TextAlign.center,
                       ),
                     )),
+          ),
         ),
-      ),
-    );
+      );
+    });
   }
 }
 
