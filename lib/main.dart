@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -90,6 +91,83 @@ class ClapData {
         sound: j['sound'] ?? '',
         notes: j['notes'] ?? '',
       );
+
+  // Access by field key (the same keys used for history and JSON).
+  String get(String field) => switch (field) {
+        'title' => title,
+        'scene' => scene,
+        'take' => take,
+        'roll' => roll,
+        'camera' => camera,
+        'aperture' => aperture,
+        'fps' => fps,
+        'shutter' => shutter,
+        'lens' => lens,
+        'sound' => sound,
+        'notes' => notes,
+        _ => '',
+      };
+
+  void set(String field, String value) {
+    switch (field) {
+      case 'title':
+        title = value;
+      case 'scene':
+        scene = value;
+      case 'take':
+        take = value;
+      case 'roll':
+        roll = value;
+      case 'camera':
+        camera = value;
+      case 'aperture':
+        aperture = value;
+      case 'fps':
+        fps = value;
+      case 'shutter':
+        shutter = value;
+      case 'lens':
+        lens = value;
+      case 'sound':
+        sound = value;
+      case 'notes':
+        notes = value;
+    }
+  }
+}
+
+// Fixed text shown around a field's value so it never has to be typed:
+// aperture reads "f/2.8", shutter reads "1/50s". Only the variable part
+// ("2.8", "50") is stored.
+const Map<String, ({String prefix, String suffix})> kFieldAffixes = {
+  'aperture': (prefix: 'f/', suffix: ''),
+  'shutter': (prefix: '1/', suffix: 's'),
+};
+
+// Removes a typed-in copy of the field's fixed prefix/suffix, so "F/2.8" and
+// "2.8" are stored the same way. Fields without affixes are returned as is.
+String stripAffixes(String field, String value) {
+  final affix = kFieldAffixes[field];
+  if (affix == null) return value;
+  var v = value.trim();
+  if (affix.prefix.isNotEmpty &&
+      v.toLowerCase().startsWith(affix.prefix.toLowerCase())) {
+    v = v.substring(affix.prefix.length).trimLeft();
+  }
+  if (affix.suffix.isNotEmpty &&
+      v.toLowerCase().endsWith(affix.suffix.toLowerCase())) {
+    v = v.substring(0, v.length - affix.suffix.length).trimRight();
+  }
+  return v;
+}
+
+// The value as shown on the board: with its fixed prefix/suffix, or empty if
+// there is no value.
+String displayValue(String field, String value) {
+  final affix = kFieldAffixes[field];
+  if (affix == null) return value;
+  final v = stripAffixes(field, value);
+  return v.isEmpty ? '' : '${affix.prefix}$v${affix.suffix}';
 }
 
 class Preset {
@@ -170,10 +248,62 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
   static const _kBgColorKey = 'bg_color';
   static const _kFgColorKey = 'fg_color';
   static const _kHistoryKey = 'clap_history';
+  static const _kShowSceneRowKey = 'show_scene_row';
+  static const _kRowSizesKey = 'row_sizes';
 
   static const int _clapDurationMs = 1000;
-  static const int _maxHistory = 5;
+  static const int _maxHistory = 10;
   static const String _clapCredit = 'Clapboard by Adaminion';
+
+  static const double _dividerThickness = 5;
+  // Gap between the screen edge and the outer frame.
+  static const double _frameMargin = 8;
+  // Height of the invisible grab strip over each horizontal divider.
+  static const double _dragHandleHeight = 28;
+  static const double _minRowPx = 36;
+  // Most of the board height the fixed rows may take between them.
+  static const double _maxFixedShare = 0.75;
+
+  // Rows top to bottom. 'scene' (SCENE / TAKE / ROLL) can be hidden.
+  static const List<String> _rowOrder = [
+    'title',
+    'date',
+    'scene',
+    'camera',
+    'shutter',
+    'bar',
+  ];
+  // Default px height (at text size M) of the rows that don't flex.
+  static const Map<String, double> _fixedRowBase = {
+    'title': 56,
+    'date': 44,
+    'bar': 144,
+  };
+  // Fixed rows: multiplier of their default height. Grid rows: flex weight
+  // for sharing whatever height the fixed rows leave.
+  static const Map<String, double> _defaultRowSizes = {
+    'title': 1,
+    'date': 1,
+    'scene': 2,
+    'camera': 1,
+    'shutter': 1,
+    'bar': 1,
+  };
+
+  // Fields that keep a list of remembered values, in board order.
+  static const List<(String, String)> _listFields = [
+    ('title', 'TITLE'),
+    ('scene', 'SCENE'),
+    ('take', 'TAKE'),
+    ('roll', 'ROLL'),
+    ('camera', 'CAMERA'),
+    ('aperture', 'APERTURE'),
+    ('fps', 'FPS'),
+    ('shutter', 'SHUTTER'),
+    ('lens', 'LENS'),
+    ('sound', 'SOUND'),
+    ('notes', 'NOTES'),
+  ];
 
   static const Map<String, double> _textScales = {
     'S': 0.85,
@@ -208,6 +338,10 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
   String _textSize = 'M';
   Color _bgColor = Colors.black;
   Color _fgColor = Colors.white;
+  bool _showSceneRow = true;
+  // Row sizes the user has changed by dragging a divider; see
+  // [_defaultRowSizes] for what the numbers mean.
+  Map<String, double> _rowSizes = {};
   DateTime? _clapStart;
   DateTime _now = DateTime.now();
   Timer? _clockTimer;
@@ -283,7 +417,26 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
             ));
       } catch (_) {}
     }
+    _showSceneRow = prefs.getBool(_kShowSceneRowKey) ?? true;
+    final rowSizesRaw = prefs.getString(_kRowSizesKey);
+    if (rowSizesRaw != null) {
+      try {
+        final m = jsonDecode(rowSizesRaw) as Map<String, dynamic>;
+        _rowSizes = {
+          for (final e in m.entries)
+            if (_defaultRowSizes.containsKey(e.key) &&
+                e.value is num &&
+                (e.value as num).isFinite &&
+                (e.value as num) > 0)
+              e.key: (e.value as num).toDouble(),
+        };
+      } catch (_) {}
+    }
     if (mounted) setState(() {});
+  }
+
+  Future<void> _saveRowSizes() async {
+    await _prefs?.setString(_kRowSizesKey, jsonEncode(_rowSizes));
   }
 
   Future<void> _saveData() async {
@@ -309,7 +462,7 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
   // Push a value to the front of [field]'s history. Empty values are ignored;
   // duplicates are moved to the front; the list is capped at [_maxHistory].
   void _pushHistory(String field, String value) {
-    final v = value.trim();
+    final v = stripAffixes(field, value).trim();
     if (v.isEmpty) return;
     final list = List<String>.from(_history[field] ?? const <String>[]);
     list.remove(v);
@@ -422,7 +575,7 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
       items: history
           .map((h) => PopupMenuItem<String>(
                 value: h,
-                child: Text(h),
+                child: Text(displayValue(field, h)),
               ))
           .toList(),
     );
@@ -447,7 +600,8 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
       _pushHistory(field, current);
     }
     final controller = TextEditingController();
-    final value = await showDialog<String>(
+    final affix = kFieldAffixes[field];
+    final typed = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('Edit $label'),
@@ -456,7 +610,12 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
           autofocus: true,
           keyboardType: keyboard,
           textCapitalization: TextCapitalization.characters,
-          decoration: InputDecoration(hintText: label),
+          decoration: InputDecoration(
+            hintText: label,
+            // The fixed parts ("f/", "1/…s") are shown, not typed.
+            prefixText: affix?.prefix,
+            suffixText: affix?.suffix,
+          ),
           onSubmitted: (v) => Navigator.pop(ctx, v),
         ),
         actions: [
@@ -469,13 +628,45 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
         ],
       ),
     );
-    if (value != null) {
+    if (typed != null) {
+      final value = stripAffixes(field, typed);
       setState(() => onSet(value));
       if (value.trim().isNotEmpty) {
         _pushHistory(field, value);
       }
       _saveData();
     }
+  }
+
+  // Opens the full-screen editor for every field's remembered values, then
+  // stores what comes back: blanks dropped, duplicates collapsed.
+  Future<void> _editLists() async {
+    final slots = <String, List<String>>{
+      for (final (field, _) in _listFields)
+        field: List<String>.generate(_maxHistory, (i) {
+          final h = _history[field] ?? const <String>[];
+          return i < h.length ? stripAffixes(field, h[i]) : '';
+        }),
+    };
+    await Navigator.of(context).push(MaterialPageRoute<void>(
+      builder: (_) => _ListsEditorPage(fields: _listFields, slots: slots),
+    ));
+    final next = Map<String, List<String>>.of(_history);
+    slots.forEach((field, values) {
+      final seen = <String>{};
+      final cleaned = [
+        for (final v in values.map((v) => stripAffixes(field, v).trim()))
+          if (v.isNotEmpty && seen.add(v)) v,
+      ];
+      if (cleaned.isEmpty) {
+        next.remove(field);
+      } else {
+        next[field] = cleaned;
+      }
+    });
+    _history = next;
+    if (mounted) setState(() {});
+    await _saveHistory();
   }
 
   // ---------------------------------------------------------------------------
@@ -486,8 +677,11 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
     final action = await showModalBottomSheet<String>(
       context: context,
       backgroundColor: Colors.grey[900],
+      // Size to the content and scroll when the screen is too short for it.
+      isScrollControlled: true,
       builder: (ctx) => SafeArea(
-        child: Column(
+        child: SingleChildScrollView(
+          child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
@@ -501,6 +695,30 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
               title: const Text('Load preset',
                   style: TextStyle(color: Colors.white)),
               onTap: () => Navigator.pop(ctx, 'load'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.edit_note, color: Colors.white),
+              title: const Text('Edit remembered values',
+                  style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(ctx, 'lists'),
+            ),
+            const Divider(color: Colors.white24, height: 1),
+            ListTile(
+              leading: Icon(
+                _showSceneRow
+                    ? Icons.check_box
+                    : Icons.check_box_outline_blank,
+                color: Colors.white,
+              ),
+              title: const Text('Show SCENE / TAKE / ROLL row',
+                  style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(ctx, 'scenerow'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.height, color: Colors.white),
+              title: const Text('Reset row heights',
+                  style: TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(ctx, 'resetrows'),
             ),
             const Divider(color: Colors.white24, height: 1),
             ListTile(
@@ -535,11 +753,23 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
               onTap: () => Navigator.pop(ctx, 'reset'),
             ),
           ],
+          ),
         ),
       ),
     );
     if (!mounted) return;
     switch (action) {
+      case 'lists':
+        await _editLists();
+        break;
+      case 'scenerow':
+        setState(() => _showSceneRow = !_showSceneRow);
+        await _prefs?.setBool(_kShowSceneRowKey, _showSceneRow);
+        break;
+      case 'resetrows':
+        setState(() => _rowSizes = {});
+        await _saveRowSizes();
+        break;
       case 'save':
         await _savePresetDialog();
         break;
@@ -736,6 +966,99 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
   }
 
   // ---------------------------------------------------------------------------
+  // Row layout
+  // ---------------------------------------------------------------------------
+
+  List<String> get _visibleRows => [
+        for (final r in _rowOrder)
+          if (r != 'scene' || _showSceneRow) r,
+      ];
+
+  bool _isFixedRow(String row) => _fixedRowBase.containsKey(row);
+
+  double _rowSize(String row) => _rowSizes[row] ?? _defaultRowSizes[row]!;
+
+  // Height in px of a fixed row whose size multiplier is 1.0. Follows the text
+  // size setting, and shrinks on short screens (phones in landscape) so the
+  // fixed rows don't starve the grid.
+  double _fixedUnit(String row, double avail) =>
+      _fixedRowBase[row]! * _scale * (avail / 500).clamp(0.5, 1.0);
+
+  // Heights in px of the visible rows, given the height left for them once the
+  // dividers between them are subtracted.
+  Map<String, double> _rowHeights(double avail) {
+    final rows = _visibleRows;
+    final heights = <String, double>{};
+    var fixedSum = 0.0;
+    var weightSum = 0.0;
+    for (final r in rows) {
+      if (_isFixedRow(r)) {
+        final h = _fixedUnit(r, avail) * _rowSize(r);
+        heights[r] = h;
+        fixedSum += h;
+      } else {
+        weightSum += _rowSize(r);
+      }
+    }
+    final maxFixed = avail * _maxFixedShare;
+    if (fixedSum > maxFixed) {
+      final f = maxFixed / fixedSum;
+      heights.updateAll((_, h) => h * f);
+      fixedSum = maxFixed;
+    }
+    final rest = math.max(0.0, avail - fixedSum);
+    for (final r in rows) {
+      if (!_isFixedRow(r)) heights[r] = rest * _rowSize(r) / weightSum;
+    }
+    return heights;
+  }
+
+  // Drag of the horizontal divider below visible row [index]. The line under
+  // a row sizes that row: it grows by [dy], and the space comes out of the
+  // next row down that flexes (the header rows never give up height for each
+  // other, they just shift). Fonts follow because every cell sizes its text
+  // from its own height.
+  void _dragDivider(int index, double dy, double avail) {
+    final rows = _visibleRows;
+    if (index < 0 || index >= rows.length - 1) return;
+    final h = _rowHeights(avail);
+    final above = rows[index];
+    var j = index + 1;
+    while (j < rows.length - 1 && _isFixedRow(rows[j])) {
+      j++;
+    }
+    final below = rows[j];
+    final lo = math.min(0.0, _minRowPx - h[above]!);
+    final hi = math.max(0.0, h[below]! - _minRowPx);
+    final d = dy.clamp(lo, hi).toDouble();
+    if (d == 0) return;
+
+    double fixedTotal() => rows
+        .where(_isFixedRow)
+        .fold(0.0, (sum, r) => sum + h[r]!);
+    final fixedBefore = fixedTotal();
+    h[above] = h[above]! + d;
+    h[below] = h[below]! - d;
+    final fixedAfter = fixedTotal();
+    if (fixedAfter > fixedBefore && fixedAfter > avail * _maxFixedShare) return;
+
+    // Convert the new pixel heights back into stored sizes: multipliers for
+    // the fixed rows, flex weights (same total as before) for the grid rows.
+    final grid = rows.where((r) => !_isFixedRow(r)).toList();
+    final weightSum = grid.fold(0.0, (sum, r) => sum + _rowSize(r));
+    final gridPx = grid.fold(0.0, (sum, r) => sum + h[r]!);
+    setState(() {
+      for (final r in rows) {
+        if (_isFixedRow(r)) {
+          _rowSizes[r] = h[r]! / _fixedUnit(r, avail);
+        } else if (gridPx > 0) {
+          _rowSizes[r] = h[r]! * weightSum / gridPx;
+        }
+      }
+    });
+  }
+
+  // ---------------------------------------------------------------------------
   // Build
   // ---------------------------------------------------------------------------
 
@@ -745,278 +1068,321 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
     final fg = _clapping ? _bgColor : _fgColor;
     final dimFg = fg.withValues(alpha: 0.45);
     final divider = fg.withValues(alpha: 0.7);
-    final scale = _scale;
-    const dividerThickness = 5.0;
-
-    final body = SafeArea(
-      child: Column(
-        children: [
-          _HeaderCell(
-            label: 'TITLE',
-            value: _data.title,
-            fg: fg,
-            divider: divider,
-            dividerThickness: dividerThickness,
-            height: 56 * scale,
-            onTap: (ctx) => _showHistoryMenuAt(
-                ctx, 'title', (v) => _data.title = v),
-            onLongPress: () => _longPressEdit(
-                'TITLE', 'title', _data.title, (v) => _data.title = v),
-          ),
-          _HeaderCell(
-            label: 'DATE/TIME',
-            value: _fmtDateTime(_now),
-            fg: fg,
-            divider: divider,
-            dividerThickness: dividerThickness,
-            height: 44 * scale,
-            valueOnly: true,
-          ),
-          // SCENE / TAKE / ROLL row — twice as tall as the lower rows
-          Expanded(
-            flex: 2,
-            child: Row(
-              children: [
-                Expanded(
-                  child: _BumpCell(
-                    label: 'SCENE',
-                    value: _data.scene,
-                    fg: fg,
-                    dimFg: dimFg,
-                    onTap: (ctx) => _showHistoryMenuAt(
-                        ctx, 'scene', (v) => _data.scene = v),
-                    onPlus: () => _bumpScene(1),
-                    onMinus: () => _bumpScene(-1),
-                    onClear: () => _clearWithHistory(
-                        'scene', _data.scene, () => _data.scene = ''),
-                    onLongPress: () => _longPressEdit(
-                        'SCENE', 'scene', _data.scene,
-                        (v) => _data.scene = v),
-                  ),
-                ),
-                _VDivider(color: divider, thickness: dividerThickness),
-                Expanded(
-                  child: _BumpCell(
-                    label: 'TAKE',
-                    value: _data.take,
-                    fg: fg,
-                    dimFg: dimFg,
-                    onTap: (ctx) => _showHistoryMenuAt(
-                        ctx, 'take', (v) => _data.take = v),
-                    onPlus: () => _bumpTake(1),
-                    onMinus: () => _bumpTake(-1),
-                    onClear: () => _clearWithHistory(
-                        'take', _data.take, () => _data.take = ''),
-                    onLongPress: () => _longPressEdit(
-                        'TAKE', 'take', _data.take,
-                        (v) => _data.take = v),
-                  ),
-                ),
-                _VDivider(color: divider, thickness: dividerThickness),
-                Expanded(
-                  child: _SimpleCell(
-                    label: 'ROLL',
-                    value: _data.roll,
-                    fg: fg,
-                    onTap: (ctx) => _showHistoryMenuAt(
-                        ctx, 'roll', (v) => _data.roll = v),
-                    onLongPress: () => _longPressEdit(
-                        'ROLL', 'roll', _data.roll,
-                        (v) => _data.roll = v),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Container(height: dividerThickness, color: divider),
-          // CAMERA / APERTURE / FPS
-          Expanded(
-            flex: 1,
-            child: Row(
-              children: [
-                Expanded(
-                  child: _SimpleCell(
-                    label: 'CAMERA',
-                    value: _data.camera,
-                    fg: fg,
-                    onTap: (ctx) => _showHistoryMenuAt(
-                        ctx, 'camera', (v) => _data.camera = v),
-                    onLongPress: () => _longPressEdit(
-                        'CAMERA', 'camera', _data.camera,
-                        (v) => _data.camera = v),
-                  ),
-                ),
-                _VDivider(color: divider, thickness: dividerThickness),
-                Expanded(
-                  child: _SimpleCell(
-                    label: 'APERTURE',
-                    value: _data.aperture,
-                    fg: fg,
-                    onTap: (ctx) => _showHistoryMenuAt(
-                        ctx, 'aperture', (v) => _data.aperture = v),
-                    onLongPress: () => _longPressEdit(
-                        'APERTURE', 'aperture', _data.aperture,
-                        (v) => _data.aperture = v),
-                  ),
-                ),
-                _VDivider(color: divider, thickness: dividerThickness),
-                Expanded(
-                  child: _SimpleCell(
-                    label: 'FPS',
-                    value: _data.fps,
-                    fg: fg,
-                    onTap: (ctx) => _showHistoryMenuAt(
-                        ctx, 'fps', (v) => _data.fps = v),
-                    onLongPress: () => _longPressEdit(
-                      'FPS',
-                      'fps',
-                      _data.fps,
-                      (v) => _data.fps = v,
-                      keyboard:
-                          const TextInputType.numberWithOptions(decimal: true),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Container(height: dividerThickness, color: divider),
-          // SHUTTER / LENS / SOUND
-          Expanded(
-            flex: 1,
-            child: Row(
-              children: [
-                Expanded(
-                  child: _SimpleCell(
-                    label: 'SHUTTER',
-                    value: _data.shutter,
-                    fg: fg,
-                    onTap: (ctx) => _showHistoryMenuAt(
-                        ctx, 'shutter', (v) => _data.shutter = v),
-                    onLongPress: () => _longPressEdit(
-                        'SHUTTER', 'shutter', _data.shutter,
-                        (v) => _data.shutter = v),
-                  ),
-                ),
-                _VDivider(color: divider, thickness: dividerThickness),
-                Expanded(
-                  child: _SimpleCell(
-                    label: 'LENS',
-                    value: _data.lens,
-                    fg: fg,
-                    onTap: (ctx) => _showHistoryMenuAt(
-                        ctx, 'lens', (v) => _data.lens = v),
-                    onLongPress: () => _longPressEdit(
-                        'LENS', 'lens', _data.lens,
-                        (v) => _data.lens = v),
-                  ),
-                ),
-                _VDivider(color: divider, thickness: dividerThickness),
-                Expanded(
-                  child: _SimpleCell(
-                    label: 'SOUND',
-                    value: _data.sound,
-                    fg: fg,
-                    onTap: (ctx) => _showHistoryMenuAt(
-                        ctx, 'sound', (v) => _data.sound = v),
-                    onLongPress: () => _longPressEdit(
-                        'SOUND', 'sound', _data.sound,
-                        (v) => _data.sound = v),
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Container(height: dividerThickness, color: divider),
-          // CLAP bar — double-tall, split CLAP (1/3) / NOTES (2/3) / menu
-          SizedBox(
-            height: 144 * scale,
-            child: Row(
-              children: [
-                Expanded(
-                  flex: 1,
-                  child: InkWell(
-                    onTap: _clap,
-                    child: Center(
-                      child: _clapping
-                          ? Text(
-                              _clapRemainingMs.toString().padLeft(4, '0'),
-                              style: TextStyle(
-                                color: fg,
-                                fontSize: 64 * scale,
-                                fontWeight: FontWeight.bold,
-                                fontFeatures: const [
-                                  FontFeature.tabularFigures(),
-                                ],
-                                letterSpacing: 4,
-                              ),
-                            )
-                          : Text(
-                              'CLAP',
-                              style: TextStyle(
-                                color: dimFg,
-                                fontSize: 48 * scale,
-                                fontWeight: FontWeight.bold,
-                                letterSpacing: 8,
-                              ),
-                            ),
-                    ),
-                  ),
-                ),
-                _VDivider(color: divider, thickness: dividerThickness),
-                Expanded(
-                  flex: 2,
-                  child: _NotesPanel(
-                    notes: _data.notes,
-                    fg: fg,
-                    dimFg: dimFg,
-                    clapping: _clapping,
-                    creditText: _clapCredit,
-                    onTap: (ctx) => _showHistoryMenuAt(
-                        ctx, 'notes', (v) => _data.notes = v),
-                    onLongPress: () => _longPressEdit(
-                        'NOTES', 'notes', _data.notes,
-                        (v) => _data.notes = v),
-                  ),
-                ),
-                Container(width: dividerThickness, color: divider),
-                SizedBox(
-                  width: 72 * scale,
-                  child: IconButton(
-                    icon: Icon(Icons.menu, color: dimFg, size: 32 * scale),
-                    onPressed: _openMenu,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
 
     return Scaffold(
       backgroundColor: bg,
-      body: Stack(
-        children: [
-          body,
-          // Tiny build-number overlay in the bottom-right corner.
-          if (_buildInfo.isNotEmpty)
-            Positioned(
-              right: 4,
-              bottom: 2,
-              child: IgnorePointer(
-                child: Text(
-                  'v$_buildInfo',
-                  style: TextStyle(
-                    color: dimFg.withValues(alpha: 0.5),
-                    fontSize: 9,
-                    fontFeatures: const [FontFeature.tabularFigures()],
-                  ),
+      // Keep the board still when the keyboard opens for an edit dialog.
+      resizeToAvoidBottomInset: false,
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(_frameMargin),
+          // Outer frame. Container insets its child by the border width.
+          child: Container(
+            decoration: BoxDecoration(
+              border: Border.all(color: divider, width: _dividerThickness),
+            ),
+            child: LayoutBuilder(
+              builder: (_, c) => _buildBoard(c, fg, dimFg, divider),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBoard(BoxConstraints c, Color fg, Color dimFg, Color divider) {
+    final portrait = c.maxHeight > c.maxWidth;
+    final rows = _visibleRows;
+    final avail =
+        math.max(0.0, c.maxHeight - _dividerThickness * (rows.length - 1));
+    final heights = _rowHeights(avail);
+
+    final cells = <Widget>[];
+    final handles = <Widget>[];
+    var y = 0.0;
+    for (var i = 0; i < rows.length; i++) {
+      final row = rows[i];
+      final h = heights[row]!;
+      cells.add(Positioned(
+        left: 0,
+        right: 0,
+        top: y,
+        height: h,
+        child: _buildRow(row, h, c.maxWidth, portrait, fg, dimFg, divider),
+      ));
+      y += h;
+      if (i == rows.length - 1) break;
+      cells.add(Positioned(
+        left: 0,
+        right: 0,
+        top: y,
+        height: _dividerThickness,
+        child: ColoredBox(color: divider),
+      ));
+      // Invisible grab strip centred on the divider line.
+      handles.add(Positioned(
+        left: 0,
+        right: 0,
+        top: y + (_dividerThickness - _dragHandleHeight) / 2,
+        height: _dragHandleHeight,
+        child: _RowDragHandle(
+          key: ValueKey('divider-$row'),
+          onDrag: (dy) => _dragDivider(i, dy, avail),
+          onEnd: _saveRowSizes,
+        ),
+      ));
+      y += _dividerThickness;
+    }
+
+    return Stack(
+      children: [
+        ...cells,
+        ...handles,
+        // Tiny build-number overlay in the bottom-right corner, inside the
+        // frame so rounded screen corners can't clip it.
+        if (_buildInfo.isNotEmpty)
+          Positioned(
+            right: 4,
+            bottom: 2,
+            child: IgnorePointer(
+              child: Text(
+                'v$_buildInfo',
+                style: TextStyle(
+                  color: dimFg.withValues(alpha: 0.5),
+                  fontSize: 9,
+                  fontFeatures: const [FontFeature.tabularFigures()],
                 ),
               ),
             ),
-        ],
+          ),
+      ],
+    );
+  }
+
+  Widget _buildRow(
+    String row,
+    double h,
+    double width,
+    bool portrait,
+    Color fg,
+    Color dimFg,
+    Color divider,
+  ) {
+    switch (row) {
+      case 'title':
+        return _HeaderCell(
+          label: 'TITLE',
+          value: _data.title,
+          fg: fg,
+          height: h,
+          onTap: (ctx) =>
+              _showHistoryMenuAt(ctx, 'title', (v) => _data.title = v),
+          onLongPress: () => _longPressEdit(
+              'TITLE', 'title', _data.title, (v) => _data.title = v),
+        );
+      case 'date':
+        return _HeaderCell(
+          label: 'DATE/TIME',
+          value: _fmtDateTime(_now),
+          fg: fg,
+          height: h,
+          valueOnly: true,
+        );
+      case 'scene':
+        return _tripleRow(divider, [
+          _bumpCell('SCENE', 'scene', fg, dimFg, _bumpScene),
+          _bumpCell('TAKE', 'take', fg, dimFg, _bumpTake),
+          _simpleCell('ROLL', 'roll', fg),
+        ]);
+      case 'camera':
+        return _tripleRow(divider, [
+          _simpleCell('CAMERA', 'camera', fg),
+          _simpleCell('APERTURE', 'aperture', fg),
+          _simpleCell(
+            'FPS',
+            'fps',
+            fg,
+            labelRight: true,
+            keyboard: const TextInputType.numberWithOptions(decimal: true),
+          ),
+        ]);
+      case 'shutter':
+        return _tripleRow(divider, [
+          _simpleCell('SHUTTER', 'shutter', fg),
+          _simpleCell('LENS', 'lens', fg),
+          _simpleCell('SOUND', 'sound', fg),
+        ]);
+      default:
+        return _buildBar(h, width, portrait, fg, dimFg, divider);
+    }
+  }
+
+  Widget _tripleRow(Color divider, List<Widget> cells) {
+    return Row(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(child: cells[0]),
+        _VDivider(color: divider, thickness: _dividerThickness),
+        Expanded(child: cells[1]),
+        _VDivider(color: divider, thickness: _dividerThickness),
+        Expanded(child: cells[2]),
+      ],
+    );
+  }
+
+  Widget _simpleCell(
+    String label,
+    String field,
+    Color fg, {
+    bool labelRight = false,
+    TextInputType keyboard = TextInputType.text,
+  }) {
+    final value = _data.get(field);
+    return _SimpleCell(
+      label: label,
+      value: displayValue(field, value),
+      fg: fg,
+      labelRight: labelRight,
+      onTap: (ctx) =>
+          _showHistoryMenuAt(ctx, field, (v) => _data.set(field, v)),
+      onLongPress: () => _longPressEdit(
+        label,
+        field,
+        value,
+        (v) => _data.set(field, v),
+        keyboard: keyboard,
       ),
+    );
+  }
+
+  Widget _bumpCell(
+    String label,
+    String field,
+    Color fg,
+    Color dimFg,
+    void Function(int) bump,
+  ) {
+    final value = _data.get(field);
+    return _BumpCell(
+      label: label,
+      value: value,
+      fg: fg,
+      dimFg: dimFg,
+      onTap: (ctx) =>
+          _showHistoryMenuAt(ctx, field, (v) => _data.set(field, v)),
+      onPlus: () => bump(1),
+      onMinus: () => bump(-1),
+      onClear: () =>
+          _clearWithHistory(field, value, () => _data.set(field, '')),
+      onLongPress: () =>
+          _longPressEdit(label, field, value, (v) => _data.set(field, v)),
+    );
+  }
+
+  // Bottom bar. Landscape: CLAP (1/3) | NOTES (2/3) | menu, side by side.
+  // Portrait: NOTES across the full width, with CLAP | menu underneath, so
+  // nothing is squeezed into a sliver on a narrow screen.
+  Widget _buildBar(
+    double h,
+    double width,
+    bool portrait,
+    Color fg,
+    Color dimFg,
+    Color divider,
+  ) {
+    Widget clap(double fontRef) => InkWell(
+          onTap: _clap,
+          child: Center(
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8),
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                child: _clapping
+                    ? Text(
+                        _clapRemainingMs.toString().padLeft(4, '0'),
+                        style: TextStyle(
+                          color: fg,
+                          fontSize: fontRef * 0.44,
+                          fontWeight: FontWeight.bold,
+                          fontFeatures: const [
+                            FontFeature.tabularFigures(),
+                          ],
+                          letterSpacing: 4,
+                        ),
+                      )
+                    : Text(
+                        'CLAP',
+                        style: TextStyle(
+                          color: dimFg,
+                          fontSize: fontRef / 3,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 8,
+                        ),
+                      ),
+              ),
+            ),
+          ),
+        );
+
+    Widget notes(double fontRef) => _NotesPanel(
+          notes: _data.notes,
+          fg: fg,
+          dimFg: dimFg,
+          clapping: _clapping,
+          creditText: _clapCredit,
+          fontRef: fontRef,
+          onTap: (ctx) =>
+              _showHistoryMenuAt(ctx, 'notes', (v) => _data.notes = v),
+          onLongPress: () => _longPressEdit(
+              'NOTES', 'notes', _data.notes, (v) => _data.notes = v),
+        );
+
+    Widget menu(double rowH) {
+      final w = math.min(72 * _scale, width * 0.25);
+      return SizedBox(
+        width: w,
+        child: IconButton(
+          icon: Icon(
+            Icons.menu,
+            color: dimFg,
+            size: math.min(32 * _scale, math.min(w, rowH) * 0.7),
+          ),
+          onPressed: _openMenu,
+        ),
+      );
+    }
+
+    if (!portrait) {
+      return Row(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Expanded(flex: 1, child: clap(h)),
+          _VDivider(color: divider, thickness: _dividerThickness),
+          Expanded(flex: 2, child: notes(h)),
+          _VDivider(color: divider, thickness: _dividerThickness),
+          menu(h),
+        ],
+      );
+    }
+
+    final notesH = math.max(0.0, (h - _dividerThickness) * 0.4);
+    final clapH = math.max(0.0, h - _dividerThickness - notesH);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SizedBox(height: notesH, child: notes(notesH * 2)),
+        Container(height: _dividerThickness, color: divider),
+        Expanded(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Expanded(child: clap(clapH * 1.5)),
+              _VDivider(color: divider, thickness: _dividerThickness),
+              menu(clapH),
+            ],
+          ),
+        ),
+      ],
     );
   }
 }
@@ -1025,12 +1391,14 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
 // Cells
 // -----------------------------------------------------------------------------
 
+// Inner padding of a grid cell: 10 px, less when the row is dragged very short.
+double _cellPadding(double cellHeight) =>
+    (cellHeight * 0.08).clamp(2.0, 10.0).toDouble();
+
 class _HeaderCell extends StatelessWidget {
   final String label;
   final String value;
   final Color fg;
-  final Color divider;
-  final double dividerThickness;
   final double height;
   final bool valueOnly;
   final void Function(BuildContext)? onTap;
@@ -1040,8 +1408,6 @@ class _HeaderCell extends StatelessWidget {
     required this.label,
     required this.value,
     required this.fg,
-    required this.divider,
-    required this.dividerThickness,
     required this.height,
     this.valueOnly = false,
     this.onTap,
@@ -1058,10 +1424,6 @@ class _HeaderCell extends StatelessWidget {
         behavior: HitTestBehavior.opaque,
         child: Container(
           height: height,
-          decoration: BoxDecoration(
-            border: Border(
-                bottom: BorderSide(color: divider, width: dividerThickness)),
-          ),
           alignment: Alignment.center,
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
           child: FittedBox(
@@ -1087,6 +1449,9 @@ class _SimpleCell extends StatelessWidget {
   final String label;
   final String value;
   final Color fg;
+  // Put the label in the top-right corner, a bit larger, so it reads as a
+  // unit after the value (used for FPS).
+  final bool labelRight;
   final void Function(BuildContext) onTap;
   final VoidCallback onLongPress;
 
@@ -1094,6 +1459,7 @@ class _SimpleCell extends StatelessWidget {
     required this.label,
     required this.value,
     required this.fg,
+    this.labelRight = false,
     required this.onTap,
     required this.onLongPress,
   });
@@ -1110,20 +1476,23 @@ class _SimpleCell extends StatelessWidget {
             onLongPress: onLongPress,
             behavior: HitTestBehavior.opaque,
             child: Padding(
-              padding: const EdgeInsets.all(10),
+              padding: EdgeInsets.all(_cellPadding(h)),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   SizedBox(
+                    width: double.infinity,
                     height: labelH,
                     child: FittedBox(
                       fit: BoxFit.scaleDown,
-                      alignment: Alignment.centerLeft,
+                      alignment: labelRight
+                          ? Alignment.centerRight
+                          : Alignment.centerLeft,
                       child: Text(
                         label,
                         style: TextStyle(
                           color: fg,
-                          fontSize: labelH * 0.7,
+                          fontSize: labelH * (labelRight ? 0.85 : 0.7),
                           letterSpacing: 2,
                           fontWeight: FontWeight.w500,
                         ),
@@ -1189,7 +1558,7 @@ class _BumpCell extends StatelessWidget {
           final labelH = h * 0.22;
           final bumpH = h * 0.18;
           return Padding(
-            padding: const EdgeInsets.all(10),
+            padding: EdgeInsets.all(_cellPadding(h)),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -1289,12 +1658,15 @@ class _BumpButton extends StatelessWidget {
     return InkWell(
       onTap: onTap,
       child: Center(
-        child: Text(
-          symbol,
-          style: TextStyle(
-            color: fg,
-            fontSize: size,
-            fontWeight: FontWeight.bold,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            symbol,
+            style: TextStyle(
+              color: fg,
+              fontSize: size,
+              fontWeight: FontWeight.bold,
+            ),
           ),
         ),
       ),
@@ -1308,6 +1680,8 @@ class _NotesPanel extends StatelessWidget {
   final Color dimFg;
   final bool clapping;
   final String creditText;
+  // Height the font sizes are derived from (144 = the default bar height).
+  final double fontRef;
   final void Function(BuildContext) onTap;
   final VoidCallback onLongPress;
 
@@ -1317,19 +1691,22 @@ class _NotesPanel extends StatelessWidget {
     required this.dimFg,
     required this.clapping,
     required this.creditText,
+    required this.fontRef,
     required this.onTap,
     required this.onLongPress,
   });
 
   @override
   Widget build(BuildContext context) {
+    final k = fontRef / 144;
     return Builder(builder: (ctx) {
       return GestureDetector(
         onTap: () => onTap(ctx),
         onLongPress: onLongPress,
         behavior: HitTestBehavior.opaque,
         child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        padding: EdgeInsets.symmetric(
+            horizontal: 16, vertical: math.min(8.0, fontRef * 0.05)),
         child: Center(
           child: clapping
               ? FittedBox(
@@ -1338,19 +1715,22 @@ class _NotesPanel extends StatelessWidget {
                     creditText,
                     style: TextStyle(
                       color: fg,
-                      fontSize: 36,
+                      fontSize: 36 * k,
                       fontStyle: FontStyle.italic,
                       letterSpacing: 1,
                     ),
                   ),
                 )
               : (notes.isEmpty
-                  ? Text(
-                      '— notes —',
-                      style: TextStyle(
-                        color: dimFg.withValues(alpha: 0.5),
-                        fontSize: 20,
-                        fontStyle: FontStyle.italic,
+                  ? FittedBox(
+                      fit: BoxFit.scaleDown,
+                      child: Text(
+                        '— notes —',
+                        style: TextStyle(
+                          color: dimFg.withValues(alpha: 0.5),
+                          fontSize: 20 * k,
+                          fontStyle: FontStyle.italic,
+                        ),
                       ),
                     )
                   : FittedBox(
@@ -1359,7 +1739,7 @@ class _NotesPanel extends StatelessWidget {
                         notes,
                         style: TextStyle(
                           color: fg,
-                          fontSize: 28,
+                          fontSize: 28 * k,
                         ),
                         textAlign: TextAlign.center,
                       ),
@@ -1379,5 +1759,175 @@ class _VDivider extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Container(width: thickness, color: color);
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Row drag handle
+// -----------------------------------------------------------------------------
+
+// Invisible strip laid over a horizontal divider. Dragging it vertically
+// resizes the two rows it separates. It is translucent to hit testing, so taps
+// and long-presses still reach the cells underneath.
+class _RowDragHandle extends StatelessWidget {
+  final void Function(double dy) onDrag;
+  final VoidCallback onEnd;
+
+  const _RowDragHandle({super.key, required this.onDrag, required this.onEnd});
+
+  @override
+  Widget build(BuildContext context) {
+    return MouseRegion(
+      cursor: SystemMouseCursors.resizeRow,
+      opaque: false,
+      hitTestBehavior: HitTestBehavior.translucent,
+      child: GestureDetector(
+        behavior: HitTestBehavior.translucent,
+        onVerticalDragUpdate: (d) => onDrag(d.delta.dy),
+        onVerticalDragEnd: (_) => onEnd(),
+        onVerticalDragCancel: onEnd,
+      ),
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Remembered-values editor
+// -----------------------------------------------------------------------------
+
+// Full-screen editor for the per-field remembered values: one block per field,
+// each with a fixed number of text rows. Edits are written straight into
+// [slots]; the caller cleans them up and saves once this page is closed.
+class _ListsEditorPage extends StatefulWidget {
+  final List<(String, String)> fields; // (field key, label)
+  final Map<String, List<String>> slots;
+
+  const _ListsEditorPage({required this.fields, required this.slots});
+
+  @override
+  State<_ListsEditorPage> createState() => _ListsEditorPageState();
+}
+
+class _ListsEditorPageState extends State<_ListsEditorPage> {
+  late final Map<String, List<TextEditingController>> _controllers;
+
+  @override
+  void initState() {
+    super.initState();
+    _controllers = {
+      for (final (field, _) in widget.fields)
+        field: [
+          for (final v in widget.slots[field]!) TextEditingController(text: v),
+        ],
+    };
+  }
+
+  @override
+  void dispose() {
+    for (final list in _controllers.values) {
+      for (final c in list) {
+        c.dispose();
+      }
+    }
+    super.dispose();
+  }
+
+  Widget _section(String field, String label) {
+    final prefix = kFieldAffixes[field]?.prefix ?? '';
+    final suffix = kFieldAffixes[field]?.suffix ?? '';
+    const affixStyle = TextStyle(fontSize: 16, color: Colors.white70);
+    final controllers = _controllers[field]!;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: const TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+            letterSpacing: 2,
+          ),
+        ),
+        const SizedBox(height: 8),
+        for (var i = 0; i < controllers.length; i++)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 26,
+                  child: Text(
+                    '${i + 1}',
+                    style: const TextStyle(color: Colors.white54),
+                  ),
+                ),
+                // The fixed parts sit outside the box: only the middle is typed.
+                if (prefix.isNotEmpty) ...[
+                  Text(prefix, style: affixStyle),
+                  const SizedBox(width: 6),
+                ],
+                Expanded(
+                  child: TextField(
+                    key: ValueKey('list-$field-$i'),
+                    controller: controllers[i],
+                    textCapitalization: TextCapitalization.characters,
+                    textInputAction: TextInputAction.next,
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      border: OutlineInputBorder(),
+                      contentPadding:
+                          EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+                    ),
+                    onChanged: (v) => widget.slots[field]![i] = v,
+                  ),
+                ),
+                if (suffix.isNotEmpty) ...[
+                  const SizedBox(width: 6),
+                  Text(suffix, style: affixStyle),
+                ],
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Remembered values'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('Done'),
+          ),
+          const SizedBox(width: 8),
+        ],
+      ),
+      body: SafeArea(
+        child: LayoutBuilder(
+          builder: (_, c) {
+            const gap = 16.0;
+            final cols = ((c.maxWidth - gap) / (170 + gap))
+                .floor()
+                .clamp(1, widget.fields.length);
+            final colW =
+                ((c.maxWidth - gap * (cols + 1)) / cols).floorToDouble();
+            return SingleChildScrollView(
+              padding: const EdgeInsets.all(gap),
+              child: Wrap(
+                spacing: gap,
+                runSpacing: gap * 1.5,
+                children: [
+                  for (final (field, label) in widget.fields)
+                    SizedBox(width: colW, child: _section(field, label)),
+                ],
+              ),
+            );
+          },
+        ),
+      ),
+    );
   }
 }
