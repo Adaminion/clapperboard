@@ -30,6 +30,13 @@ flutter analyze
 - Text size setting (S 0.85 / M 1.0 / L 1.5 / XL 2.0) multiplies every
   font size via `_scale`.
 
+## Workflow
+
+- Always merge finished work into `main` and push it, once
+  `flutter analyze`, `flutter test` and `flutter build web --release`
+  pass. Don't leave it on a side branch waiting to be asked.
+  (Pushing `main` deploys the web app to GitHub Pages.)
+
 ## Don't (without asking)
 
 - Add new packages to `pubspec.yaml`.
