@@ -268,4 +268,177 @@ void main() {
     expect(find.text('LENS 1'), findsOneWidget);
     expect(find.text('LENS 10', skipOffstage: false), findsOneWidget);
   });
+
+  // --- Clap and countdown ---------------------------------------------------
+
+  Color scaffoldColor(WidgetTester tester) => tester
+      .widget<Scaffold>(find.byType(Scaffold).first)
+      .backgroundColor!;
+
+  String countdownText(WidgetTester tester) => tester
+      .widget<Text>(find.byKey(const ValueKey('clap-countdown')))
+      .textSpan!
+      .toPlainText();
+
+  testWidgets('without the countdown, CLAP flashes at once for one second',
+      (WidgetTester tester) async {
+    await _pumpApp(tester, size: const Size(1180, 820));
+    expect(scaffoldColor(tester), Colors.black);
+
+    await tester.tap(find.text('CLAP'));
+    await tester.pump();
+    expect(scaffoldColor(tester), Colors.white);
+    expect(find.text('CLAP'), findsNothing);
+
+    await tester.pump(const Duration(milliseconds: 600));
+    expect(scaffoldColor(tester), Colors.white);
+
+    await tester.pump(const Duration(milliseconds: 500));
+    expect(scaffoldColor(tester), Colors.black);
+    expect(find.text('CLAP'), findsOneWidget);
+  });
+
+  testWidgets('with the countdown on, the flash comes after the set seconds',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues({
+      'clap_countdown_on': true,
+      'clap_countdown_secs': 3,
+    });
+    await _pumpApp(tester, size: const Size(1180, 820));
+
+    await tester.tap(find.text('CLAP'));
+    await tester.pump();
+    // Counting down: no flash yet, 3 seconds on the readout.
+    expect(scaffoldColor(tester), Colors.black);
+    expect(find.text('CLAP'), findsNothing);
+    expect(countdownText(tester), '3  1000');
+
+    await tester.pump(const Duration(milliseconds: 1250));
+    expect(scaffoldColor(tester), Colors.black);
+    expect(countdownText(tester), '2  0750');
+
+    await tester.pump(const Duration(milliseconds: 1500));
+    expect(scaffoldColor(tester), Colors.black);
+    expect(countdownText(tester), '1  0250');
+
+    // 3 s after the tap: the clap itself.
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(scaffoldColor(tester), Colors.white);
+    expect(find.byKey(const ValueKey('clap-countdown')), findsNothing);
+    expect(find.text('0950'), findsOneWidget);
+
+    // ...which lasts one second, as before.
+    await tester.pump(const Duration(milliseconds: 1000));
+    expect(scaffoldColor(tester), Colors.black);
+    expect(find.text('CLAP'), findsOneWidget);
+  });
+
+  testWidgets('tapping again during the countdown cancels it',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues({
+      'clap_countdown_on': true,
+      'clap_countdown_secs': 3,
+    });
+    await _pumpApp(tester, size: const Size(1180, 820));
+
+    await tester.tap(find.text('CLAP'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 1000));
+    await tester.tap(find.byKey(const ValueKey('clap-countdown')));
+    await tester.pump();
+    expect(find.text('CLAP'), findsOneWidget);
+
+    // No flash turns up later.
+    await tester.pump(const Duration(milliseconds: 2500));
+    expect(scaffoldColor(tester), Colors.black);
+    expect(find.text('CLAP'), findsOneWidget);
+  });
+
+  testWidgets('checking the countdown option asks for seconds, 10 by default',
+      (WidgetTester tester) async {
+    await _pumpApp(tester, size: const Size(1180, 820));
+    await _openMenuItem(tester, 'Countdown before clap');
+
+    final field = find.byType(TextField);
+    expect(tester.widget<TextField>(field).controller!.text, '10');
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getBool('clap_countdown_on'), isTrue);
+    expect(prefs.getInt('clap_countdown_secs'), 10);
+
+    // Unchecking it turns the countdown off without asking anything.
+    await _openMenuItem(tester, 'Countdown before clap: 10 s');
+    expect(find.byType(TextField), findsNothing);
+    expect(prefs.getBool('clap_countdown_on'), isFalse);
+
+    // Checking it again with another number keeps that number.
+    await _openMenuItem(tester, 'Countdown before clap');
+    await tester.enterText(find.byType(TextField), '5');
+    await tester.tap(find.text('OK'));
+    await tester.pumpAndSettle();
+    expect(prefs.getInt('clap_countdown_secs'), 5);
+    expect(prefs.getBool('clap_countdown_on'), isTrue);
+  });
+
+  // --- Colour calibration sheet ---------------------------------------------
+
+  final chart = find.byKey(const ValueKey('color-chart'));
+
+  testWidgets('colour sheet is off by default', (WidgetTester tester) async {
+    await _pumpApp(tester, size: const Size(1180, 820));
+    expect(chart, findsNothing);
+  });
+
+  testWidgets('colour sheet "Fullscreen" sits behind the whole board',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues({'color_chart': 'full'});
+    await _pumpApp(tester, size: const Size(1180, 820));
+
+    expect(tester.getRect(chart), const Rect.fromLTWH(0, 0, 1180, 820));
+    // The board is still there and still works on top of it.
+    expect(find.text('SCENE'), findsOneWidget);
+    await tester.tap(find.text('CLAP'));
+    await tester.pump();
+    // The flash replaces the sheet with the plain inverted screen.
+    expect(chart, findsNothing);
+    await tester.pump(const Duration(milliseconds: 1100));
+    expect(chart, findsOneWidget);
+  });
+
+  testWidgets('colour sheet "Notes" fills just the notes panel',
+      (WidgetTester tester) async {
+    SharedPreferences.setMockInitialValues({'color_chart': 'notes'});
+    await _pumpApp(tester, size: const Size(1180, 820));
+
+    final rect = tester.getRect(chart);
+    final clap = tester.getCenter(find.text('CLAP'));
+    final menu = tester.getCenter(find.byIcon(Icons.menu));
+    // Between CLAP and the menu button, in the bottom bar only.
+    expect(rect.left, greaterThan(clap.dx));
+    expect(rect.right, lessThan(menu.dx));
+    expect(rect.top, greaterThan(tester.getCenter(find.text('SOUND')).dy));
+    expect(rect.contains(Offset(rect.center.dx, clap.dy)), isTrue);
+    // No "— notes —" hint drawn over it.
+    expect(find.text('— notes —'), findsNothing);
+  });
+
+  testWidgets('colour sheet mode is picked from the menu',
+      (WidgetTester tester) async {
+    await _pumpApp(tester, size: const Size(1180, 820));
+
+    await _openMenuItem(tester, 'Color calibration sheet: Off');
+    await tester.tap(find.text('Fullscreen'));
+    await tester.pumpAndSettle();
+    expect(chart, findsOneWidget);
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('color_chart'), 'full');
+
+    await _openMenuItem(tester, 'Color calibration sheet: Fullscreen');
+    await tester.tap(find.text('Off'));
+    await tester.pumpAndSettle();
+    expect(chart, findsNothing);
+    expect(prefs.getString('color_chart'), 'off');
+  });
 }

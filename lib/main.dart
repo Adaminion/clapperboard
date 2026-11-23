@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -241,7 +242,8 @@ class ClapperboardScreen extends StatefulWidget {
   State<ClapperboardScreen> createState() => _ClapperboardScreenState();
 }
 
-class _ClapperboardScreenState extends State<ClapperboardScreen> {
+class _ClapperboardScreenState extends State<ClapperboardScreen>
+    with SingleTickerProviderStateMixin {
   static const _kDataKey = 'clap_data';
   static const _kPresetsKey = 'clap_presets';
   static const _kTextSizeKey = 'text_size';
@@ -250,8 +252,19 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
   static const _kHistoryKey = 'clap_history';
   static const _kShowSceneRowKey = 'show_scene_row';
   static const _kRowSizesKey = 'row_sizes';
+  static const _kCountdownOnKey = 'clap_countdown_on';
+  static const _kCountdownSecsKey = 'clap_countdown_secs';
+  static const _kChartModeKey = 'color_chart';
+
+  // Where the colour calibration sheet is shown.
+  static const Map<String, String> _chartModes = {
+    'off': 'Off',
+    'notes': 'Notes',
+    'full': 'Fullscreen',
+  };
 
   static const int _clapDurationMs = 1000;
+  static const int _maxCountdownSecs = 600;
   static const int _maxHistory = 10;
   static const String _clapCredit = 'Clapboard by Adaminion';
 
@@ -342,27 +355,43 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
   // Row sizes the user has changed by dragging a divider; see
   // [_defaultRowSizes] for what the numbers mean.
   Map<String, double> _rowSizes = {};
-  DateTime? _clapStart;
+  // Optional countdown between tapping CLAP and the flash.
+  bool _countdownOn = false;
+  int _countdownSecs = 10;
+  // 'off', 'notes' (behind the notes panel) or 'full' (behind everything).
+  String _chartMode = 'off';
   DateTime _now = DateTime.now();
   Timer? _clockTimer;
-  Timer? _clapTimer;
   SharedPreferences? _prefs;
   String _buildInfo = '';
 
+  // A clap run is an optional countdown ([_clapLeadMs] long) followed by the
+  // flash. The ticker reports the time since CLAP was tapped.
+  late final Ticker _clapTicker;
+  bool _clapRunning = false;
+  Duration _clapElapsed = Duration.zero;
+  int _clapLeadMs = 0;
+  bool _flashAnnounced = false;
+
   double get _scale => _textScales[_textSize] ?? 1.0;
 
-  bool get _clapping => _clapStart != null;
+  bool get _countingDown =>
+      _clapRunning && _clapElapsed.inMilliseconds < _clapLeadMs;
 
-  int get _clapRemainingMs {
-    if (_clapStart == null) return 0;
-    final elapsed = DateTime.now().difference(_clapStart!).inMilliseconds;
-    final rem = _clapDurationMs - elapsed;
-    return rem < 0 ? 0 : rem;
-  }
+  // True during the flash itself.
+  bool get _clapping =>
+      _clapRunning && _clapElapsed.inMilliseconds >= _clapLeadMs;
+
+  int get _countdownRemainingMs =>
+      math.max(0, _clapLeadMs - _clapElapsed.inMilliseconds);
+
+  int get _clapRemainingMs => math.max(
+      0, _clapLeadMs + _clapDurationMs - _clapElapsed.inMilliseconds);
 
   @override
   void initState() {
     super.initState();
+    _clapTicker = createTicker(_onClapTick);
     _load();
     _loadBuildInfo();
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -373,7 +402,7 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
   @override
   void dispose() {
     _clockTimer?.cancel();
-    _clapTimer?.cancel();
+    _clapTicker.dispose();
     super.dispose();
   }
 
@@ -418,6 +447,15 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
       } catch (_) {}
     }
     _showSceneRow = prefs.getBool(_kShowSceneRowKey) ?? true;
+    _countdownOn = prefs.getBool(_kCountdownOnKey) ?? false;
+    final savedSecs = prefs.getInt(_kCountdownSecsKey);
+    if (savedSecs != null && savedSecs >= 1 && savedSecs <= _maxCountdownSecs) {
+      _countdownSecs = savedSecs;
+    }
+    final savedChart = prefs.getString(_kChartModeKey);
+    if (savedChart != null && _chartModes.containsKey(savedChart)) {
+      _chartMode = savedChart;
+    }
     final rowSizesRaw = prefs.getString(_kRowSizesKey);
     if (rowSizesRaw != null) {
       try {
@@ -495,21 +533,43 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
   // Clap
   // ---------------------------------------------------------------------------
 
+  // Tap on CLAP. With the countdown option on, the flash follows after the
+  // chosen number of seconds; a second tap during the countdown cancels it.
   void _clap() {
     HapticFeedback.heavyImpact();
-    _clapTimer?.cancel();
-    setState(() => _clapStart = DateTime.now());
-    _clapTimer = Timer.periodic(const Duration(milliseconds: 16), (t) {
-      if (!mounted) {
-        t.cancel();
-        return;
-      }
-      if (_clapRemainingMs <= 0) {
-        t.cancel();
-        setState(() => _clapStart = null);
-      } else {
-        setState(() {});
-      }
+    if (_countingDown) {
+      _stopClap();
+      return;
+    }
+    _clapTicker.stop();
+    setState(() {
+      _clapRunning = true;
+      _clapElapsed = Duration.zero;
+      _clapLeadMs = _countdownOn ? _countdownSecs * 1000 : 0;
+      _flashAnnounced = _clapLeadMs == 0;
+    });
+    _clapTicker.start();
+  }
+
+  void _onClapTick(Duration elapsed) {
+    final ms = elapsed.inMilliseconds;
+    if (ms >= _clapLeadMs + _clapDurationMs) {
+      _stopClap();
+      return;
+    }
+    if (!_flashAnnounced && ms >= _clapLeadMs) {
+      // The countdown just ran out: this is the clap.
+      _flashAnnounced = true;
+      HapticFeedback.heavyImpact();
+    }
+    setState(() => _clapElapsed = elapsed);
+  }
+
+  void _stopClap() {
+    _clapTicker.stop();
+    setState(() {
+      _clapRunning = false;
+      _clapElapsed = Duration.zero;
     });
   }
 
@@ -722,6 +782,28 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
             ),
             const Divider(color: Colors.white24, height: 1),
             ListTile(
+              leading: Icon(
+                _countdownOn
+                    ? Icons.check_box
+                    : Icons.check_box_outline_blank,
+                color: Colors.white,
+              ),
+              title: Text(
+                  _countdownOn
+                      ? 'Countdown before clap: $_countdownSecs s'
+                      : 'Countdown before clap',
+                  style: const TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(ctx, 'countdown'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.gradient, color: Colors.white),
+              title: Text(
+                  'Color calibration sheet: ${_chartModes[_chartMode]}',
+                  style: const TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(ctx, 'chart'),
+            ),
+            const Divider(color: Colors.white24, height: 1),
+            ListTile(
               leading: const Icon(Icons.format_size, color: Colors.white),
               title: Text('Text size: $_textSize',
                   style: const TextStyle(color: Colors.white)),
@@ -801,6 +883,12 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
           await _saveColors();
         }
         break;
+      case 'countdown':
+        await _toggleCountdown();
+        break;
+      case 'chart':
+        await _chartModeDialog();
+        break;
       case 'reset':
         setState(() {
           _data.scene = '1';
@@ -808,6 +896,79 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
         });
         _saveData();
         break;
+    }
+  }
+
+  // Unchecking turns the countdown off. Checking it asks for the number of
+  // seconds first (last value used, 10 to begin with).
+  Future<void> _toggleCountdown() async {
+    if (_countdownOn) {
+      setState(() => _countdownOn = false);
+      await _prefs?.setBool(_kCountdownOnKey, false);
+      return;
+    }
+    final text = '$_countdownSecs';
+    final controller = TextEditingController(text: text)
+      ..selection = TextSelection(baseOffset: 0, extentOffset: text.length);
+    final typed = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Countdown before clap'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: TextInputType.number,
+          inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+          decoration: const InputDecoration(suffixText: 'seconds'),
+          onSubmitted: (v) => Navigator.pop(ctx, v),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancel')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, controller.text),
+              child: const Text('OK')),
+        ],
+      ),
+    );
+    if (typed == null) return;
+    final secs = int.tryParse(typed.trim());
+    setState(() {
+      _countdownOn = true;
+      // Anything that isn't a usable number keeps the previous value.
+      if (secs != null && secs >= 1) {
+        _countdownSecs = math.min(secs, _maxCountdownSecs);
+      }
+    });
+    await _prefs?.setBool(_kCountdownOnKey, true);
+    await _prefs?.setInt(_kCountdownSecsKey, _countdownSecs);
+  }
+
+  Future<void> _chartModeDialog() async {
+    final picked = await showDialog<String>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('Color calibration sheet'),
+        children: _chartModes.entries
+            .map((e) => SimpleDialogOption(
+                  onPressed: () => Navigator.pop(ctx, e.key),
+                  child: Row(
+                    children: [
+                      Text(e.value),
+                      if (e.key == _chartMode) ...const [
+                        SizedBox(width: 12),
+                        Icon(Icons.check, size: 18),
+                      ],
+                    ],
+                  ),
+                ))
+            .toList(),
+      ),
+    );
+    if (picked != null) {
+      setState(() => _chartMode = picked);
+      await _prefs?.setString(_kChartModeKey, picked);
     }
   }
 
@@ -1069,28 +1230,72 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
     final dimFg = fg.withValues(alpha: 0.45);
     final divider = fg.withValues(alpha: 0.7);
 
+    // The sheet gives way to the plain inverted screen during the flash, so
+    // the flash stays unmistakable.
+    final chartBehindAll = _chartMode == 'full' && !_clapping;
+
     return Scaffold(
       backgroundColor: bg,
       // Keep the board still when the keyboard opens for an edit dialog.
       resizeToAvoidBottomInset: false,
-      body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(_frameMargin),
-          // Outer frame. Container insets its child by the border width.
-          child: Container(
-            decoration: BoxDecoration(
-              border: Border.all(color: divider, width: _dividerThickness),
-            ),
-            child: LayoutBuilder(
-              builder: (_, c) => _buildBoard(c, fg, dimFg, divider),
+      body: Stack(
+        fit: StackFit.expand,
+        children: [
+          if (chartBehindAll) const _ColorChart(),
+          _haloed(
+            on: chartBehindAll,
+            color: bg,
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.all(_frameMargin),
+                // Outer frame. Container insets its child by the border width.
+                child: Container(
+                  decoration: BoxDecoration(
+                    border:
+                        Border.all(color: divider, width: _dividerThickness),
+                  ),
+                  child: LayoutBuilder(
+                    builder: (_, c) => _buildBoard(c, fg, dimFg, divider, bg),
+                  ),
+                ),
+              ),
             ),
           ),
-        ),
+        ],
       ),
     );
   }
 
-  Widget _buildBoard(BoxConstraints c, Color fg, Color dimFg, Color divider) {
+  // Gives text and icons a halo in the background colour, so they stay
+  // readable on top of the colour sheet. A no-op when [on] is false.
+  Widget _haloed({
+    required bool on,
+    required Color color,
+    required Widget child,
+  }) {
+    final shadows = on
+        ? [
+            Shadow(color: color, blurRadius: 2),
+            Shadow(color: color, blurRadius: 6),
+            Shadow(color: color, blurRadius: 12),
+          ]
+        : null;
+    return DefaultTextStyle.merge(
+      style: TextStyle(shadows: shadows),
+      child: IconTheme.merge(
+        data: IconThemeData(shadows: shadows),
+        child: child,
+      ),
+    );
+  }
+
+  Widget _buildBoard(
+    BoxConstraints c,
+    Color fg,
+    Color dimFg,
+    Color divider,
+    Color bg,
+  ) {
     final portrait = c.maxHeight > c.maxWidth;
     final rows = _visibleRows;
     final avail =
@@ -1108,7 +1313,8 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
         right: 0,
         top: y,
         height: h,
-        child: _buildRow(row, h, c.maxWidth, portrait, fg, dimFg, divider),
+        child:
+            _buildRow(row, h, c.maxWidth, portrait, fg, dimFg, divider, bg),
       ));
       y += h;
       if (i == rows.length - 1) break;
@@ -1167,6 +1373,7 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
     Color fg,
     Color dimFg,
     Color divider,
+    Color bg,
   ) {
     switch (row) {
       case 'title':
@@ -1213,7 +1420,7 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
           _simpleCell('SOUND', 'sound', fg),
         ]);
       default:
-        return _buildBar(h, width, portrait, fg, dimFg, divider);
+        return _buildBar(h, width, portrait, fg, dimFg, divider, bg);
     }
   }
 
@@ -1289,7 +1496,13 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
     Color fg,
     Color dimFg,
     Color divider,
+    Color bg,
   ) {
+    // Countdown readout: whole seconds left, then the same millisecond timer
+    // as the flash, running once per second.
+    final secondsLeft = (_countdownRemainingMs + 999) ~/ 1000;
+    final msInSecond = _countdownRemainingMs - (secondsLeft - 1) * 1000;
+
     Widget clap(double fontRef) => InkWell(
           onTap: _clap,
           child: Center(
@@ -1310,31 +1523,71 @@ class _ClapperboardScreenState extends State<ClapperboardScreen> {
                           letterSpacing: 4,
                         ),
                       )
-                    : Text(
-                        'CLAP',
-                        style: TextStyle(
-                          color: dimFg,
-                          fontSize: fontRef / 3,
-                          fontWeight: FontWeight.bold,
-                          letterSpacing: 8,
-                        ),
-                      ),
+                    : _countingDown
+                        ? Text.rich(
+                            key: const ValueKey('clap-countdown'),
+                            TextSpan(
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontFeatures: [FontFeature.tabularFigures()],
+                              ),
+                              children: [
+                                TextSpan(
+                                  text: '$secondsLeft',
+                                  style: TextStyle(
+                                    color: fg,
+                                    fontSize: fontRef * 0.44,
+                                  ),
+                                ),
+                                TextSpan(
+                                  text: '  ${msInSecond.toString().padLeft(4, '0')}',
+                                  style: TextStyle(
+                                    color: dimFg,
+                                    fontSize: fontRef * 0.22,
+                                    letterSpacing: 2,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          )
+                        : Text(
+                            'CLAP',
+                            style: TextStyle(
+                              color: dimFg,
+                              fontSize: fontRef / 3,
+                              fontWeight: FontWeight.bold,
+                              letterSpacing: 8,
+                            ),
+                          ),
               ),
             ),
           ),
         );
 
-    Widget notes(double fontRef) => _NotesPanel(
-          notes: _data.notes,
-          fg: fg,
-          dimFg: dimFg,
-          clapping: _clapping,
-          creditText: _clapCredit,
-          fontRef: fontRef,
-          onTap: (ctx) =>
-              _showHistoryMenuAt(ctx, 'notes', (v) => _data.notes = v),
-          onLongPress: () => _longPressEdit(
-              'NOTES', 'notes', _data.notes, (v) => _data.notes = v),
+    final chartBehindNotes = _chartMode == 'notes' && !_clapping;
+    Widget notes(double fontRef) => Stack(
+          fit: StackFit.expand,
+          children: [
+            if (chartBehindNotes) const _ColorChart(),
+            _haloed(
+              on: chartBehindNotes,
+              color: bg,
+              child: _NotesPanel(
+                notes: _data.notes,
+                fg: fg,
+                dimFg: dimFg,
+                clapping: _clapping,
+                creditText: _clapCredit,
+                fontRef: fontRef,
+                // Leave the sheet clean when there are no notes.
+                showPlaceholder: !chartBehindNotes,
+                onTap: (ctx) =>
+                    _showHistoryMenuAt(ctx, 'notes', (v) => _data.notes = v),
+                onLongPress: () => _longPressEdit(
+                    'NOTES', 'notes', _data.notes, (v) => _data.notes = v),
+              ),
+            ),
+          ],
         );
 
     Widget menu(double rowH) {
@@ -1682,6 +1935,8 @@ class _NotesPanel extends StatelessWidget {
   final String creditText;
   // Height the font sizes are derived from (144 = the default bar height).
   final double fontRef;
+  // Whether to show the dim "— notes —" hint when there are no notes.
+  final bool showPlaceholder;
   final void Function(BuildContext) onTap;
   final VoidCallback onLongPress;
 
@@ -1692,6 +1947,7 @@ class _NotesPanel extends StatelessWidget {
     required this.clapping,
     required this.creditText,
     required this.fontRef,
+    this.showPlaceholder = true,
     required this.onTap,
     required this.onLongPress,
   });
@@ -1721,7 +1977,9 @@ class _NotesPanel extends StatelessWidget {
                     ),
                   ),
                 )
-              : (notes.isEmpty
+              : (notes.isEmpty && !showPlaceholder
+                  ? const SizedBox.shrink()
+                  : notes.isEmpty
                   ? FittedBox(
                       fit: BoxFit.scaleDown,
                       child: Text(
@@ -1749,6 +2007,68 @@ class _NotesPanel extends StatelessWidget {
       );
     });
   }
+}
+
+// Colour calibration sheet: seven ramps stacked with no gaps between them
+// (blue, green, cyan, red, magenta, yellow, grey), each stepping from black
+// on the left to full brightness on the right.
+class _ColorChart extends StatelessWidget {
+  const _ColorChart();
+
+  @override
+  Widget build(BuildContext context) {
+    return const IgnorePointer(
+      child: CustomPaint(
+        key: ValueKey('color-chart'),
+        painter: _ColorChartPainter(),
+        size: Size.infinite,
+      ),
+    );
+  }
+}
+
+class _ColorChartPainter extends CustomPainter {
+  const _ColorChartPainter();
+
+  static const int _steps = 32;
+  // Which of red, green and blue each ramp uses, top to bottom.
+  static const List<(int, int, int)> _ramps = [
+    (0, 0, 1),
+    (0, 1, 0),
+    (0, 1, 1),
+    (1, 0, 0),
+    (1, 0, 1),
+    (1, 1, 0),
+    (1, 1, 1),
+  ];
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // No anti-aliasing: neighbouring patches share exact pixel edges, so no
+    // seams show between them.
+    final paint = Paint()..isAntiAlias = false;
+    for (var row = 0; row < _ramps.length; row++) {
+      final (r, g, b) = _ramps[row];
+      final top = size.height * row / _ramps.length;
+      final bottom = size.height * (row + 1) / _ramps.length;
+      for (var i = 0; i < _steps; i++) {
+        final v = (255 * i / (_steps - 1)).round();
+        paint.color = Color.fromARGB(255, r * v, g * v, b * v);
+        canvas.drawRect(
+          Rect.fromLTRB(
+            size.width * i / _steps,
+            top,
+            size.width * (i + 1) / _steps,
+            bottom,
+          ),
+          paint,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_ColorChartPainter oldDelegate) => false;
 }
 
 class _VDivider extends StatelessWidget {
