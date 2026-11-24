@@ -2,7 +2,7 @@ name: clapperboard
 description: "Digital movie clapperboard for Android and iPad."
 publish_to: 'none'
 
-version: 0.0.1+2
+version: 3.0.0+40
 
 environment:
   sdk: ^3.11.0

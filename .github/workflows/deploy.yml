@@ -24,6 +24,14 @@ jobs:
           channel: stable
           flutter-version: '3.41.2'
       - run: flutter pub get
+      # Stamp a new build number on every deploy so the version label in the
+      # app's corner changes. The version name (3.0.0) still comes from
+      # pubspec.yaml. Run 6 was build 40, hence the offset.
+      - name: Set build number
+        run: |
+          build=$(( ${{ github.run_number }} + 34 ))
+          sed -i -E "s/^(version: *[^+ ]+)\+[0-9]+/\1+$build/" pubspec.yaml
+          grep '^version:' pubspec.yaml
       - run: flutter build web --release --base-href "/clapperboard/"
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

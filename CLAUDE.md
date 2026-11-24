@@ -36,6 +36,10 @@ flutter analyze
   `flutter analyze`, `flutter test` and `flutter build web --release`
   pass. Don't leave it on a side branch waiting to be asked.
   (Pushing `main` deploys the web app to GitHub Pages.)
+- Version: the deploy workflow replaces the build number in
+  `pubspec.yaml` (`+N`) with `run_number + 34` on each deploy, so the
+  corner label changes every release. Change the version name
+  (`3.0.0`) in `pubspec.yaml` by hand.
 
 ## Don't (without asking)
 
