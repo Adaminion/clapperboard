@@ -2,6 +2,8 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
@@ -255,6 +257,33 @@ class _ClapperboardScreenState extends State<ClapperboardScreen>
   static const _kCountdownOnKey = 'clap_countdown_on';
   static const _kCountdownSecsKey = 'clap_countdown_secs';
   static const _kChartModeKey = 'color_chart';
+  static const _kMouseClapKey = 'mouse_clap';
+
+  // Which mouse button claps from anywhere on the board, no aiming needed.
+  static const Map<String, String> _mouseClapModes = {
+    'off': 'Off',
+    'right': 'Right button',
+    'middle': 'Middle button',
+  };
+
+  // Keys from a presentation clicker (or any Bluetooth/USB keyboard).
+  // Logitech presenters send Page Down for "next" and Page Up for "back";
+  // the arrows cover clickers set to send arrow keys instead.
+  static final Set<LogicalKeyboardKey> _clapKeys = {
+    LogicalKeyboardKey.pageDown,
+    LogicalKeyboardKey.arrowRight,
+    LogicalKeyboardKey.space,
+    LogicalKeyboardKey.enter,
+    LogicalKeyboardKey.numpadEnter,
+  };
+  static final Set<LogicalKeyboardKey> _takeUpKeys = {
+    LogicalKeyboardKey.pageUp,
+    LogicalKeyboardKey.arrowLeft,
+    LogicalKeyboardKey.arrowUp,
+  };
+  static final Set<LogicalKeyboardKey> _takeDownKeys = {
+    LogicalKeyboardKey.arrowDown,
+  };
 
   // Where the colour calibration sheet is shown.
   static const Map<String, String> _chartModes = {
@@ -360,6 +389,7 @@ class _ClapperboardScreenState extends State<ClapperboardScreen>
   int _countdownSecs = 10;
   // 'off', 'notes' (behind the notes panel) or 'full' (behind everything).
   String _chartMode = 'off';
+  String _mouseClap = 'right';
   DateTime _now = DateTime.now();
   Timer? _clockTimer;
   SharedPreferences? _prefs;
@@ -392,6 +422,7 @@ class _ClapperboardScreenState extends State<ClapperboardScreen>
   void initState() {
     super.initState();
     _clapTicker = createTicker(_onClapTick);
+    HardwareKeyboard.instance.addHandler(_onKey);
     _load();
     _loadBuildInfo();
     _clockTimer = Timer.periodic(const Duration(seconds: 1), (_) {
@@ -402,6 +433,8 @@ class _ClapperboardScreenState extends State<ClapperboardScreen>
   @override
   void dispose() {
     _clockTimer?.cancel();
+    HardwareKeyboard.instance.removeHandler(_onKey);
+    if (kIsWeb) BrowserContextMenu.enableContextMenu();
     _clapTicker.dispose();
     super.dispose();
   }
@@ -456,6 +489,11 @@ class _ClapperboardScreenState extends State<ClapperboardScreen>
     if (savedChart != null && _chartModes.containsKey(savedChart)) {
       _chartMode = savedChart;
     }
+    final savedMouse = prefs.getString(_kMouseClapKey);
+    if (savedMouse != null && _mouseClapModes.containsKey(savedMouse)) {
+      _mouseClap = savedMouse;
+    }
+    await _applyContextMenu();
     final rowSizesRaw = prefs.getString(_kRowSizesKey);
     if (rowSizesRaw != null) {
       try {
@@ -571,6 +609,53 @@ class _ClapperboardScreenState extends State<ClapperboardScreen>
       _clapRunning = false;
       _clapElapsed = Duration.zero;
     });
+  }
+
+  // ---------------------------------------------------------------------------
+  // Remote control: clicker / keyboard / mouse
+  // ---------------------------------------------------------------------------
+
+  // Only the board itself reacts: not while the menu, a dialog or the
+  // remembered-values page is open (keys are for typing there).
+  bool get _boardInFront => ModalRoute.of(context)?.isCurrent ?? true;
+
+  bool _onKey(KeyEvent event) {
+    // Holding a button down must not fire again and again.
+    if (event is! KeyDownEvent || !mounted || !_boardInFront) return false;
+    final key = event.logicalKey;
+    if (_clapKeys.contains(key)) {
+      _clap();
+    } else if (_takeUpKeys.contains(key)) {
+      _bumpTake(1);
+    } else if (_takeDownKeys.contains(key)) {
+      _bumpTake(-1);
+    } else {
+      return false;
+    }
+    return true;
+  }
+
+  void _onPointerDown(PointerDownEvent event) {
+    if (event.kind != PointerDeviceKind.mouse || !_boardInFront) return;
+    final button = switch (_mouseClap) {
+      'right' => kSecondaryMouseButton,
+      'middle' => kMiddleMouseButton,
+      _ => 0,
+    };
+    if (button != 0 && event.buttons & button != 0) _clap();
+  }
+
+  // In the browser a right click opens the page's context menu; turn that
+  // off while the right button is the clap button.
+  Future<void> _applyContextMenu() async {
+    if (!kIsWeb) return;
+    try {
+      if (_mouseClap == 'right') {
+        await BrowserContextMenu.disableContextMenu();
+      } else {
+        await BrowserContextMenu.enableContextMenu();
+      }
+    } catch (_) {}
   }
 
   // ---------------------------------------------------------------------------
@@ -802,6 +887,13 @@ class _ClapperboardScreenState extends State<ClapperboardScreen>
                   style: const TextStyle(color: Colors.white)),
               onTap: () => Navigator.pop(ctx, 'chart'),
             ),
+            ListTile(
+              leading: const Icon(Icons.mouse, color: Colors.white),
+              title: Text(
+                  'Mouse click to clap: ${_mouseClapModes[_mouseClap]}',
+                  style: const TextStyle(color: Colors.white)),
+              onTap: () => Navigator.pop(ctx, 'mouse'),
+            ),
             const Divider(color: Colors.white24, height: 1),
             ListTile(
               leading: const Icon(Icons.format_size, color: Colors.white),
@@ -887,7 +979,21 @@ class _ClapperboardScreenState extends State<ClapperboardScreen>
         await _toggleCountdown();
         break;
       case 'chart':
-        await _chartModeDialog();
+        final picked = await _pickOption(
+            'Color calibration sheet', _chartModes, _chartMode);
+        if (picked != null) {
+          setState(() => _chartMode = picked);
+          await _prefs?.setString(_kChartModeKey, picked);
+        }
+        break;
+      case 'mouse':
+        final picked = await _pickOption(
+            'Mouse click to clap', _mouseClapModes, _mouseClap);
+        if (picked != null) {
+          setState(() => _mouseClap = picked);
+          await _prefs?.setString(_kMouseClapKey, picked);
+          await _applyContextMenu();
+        }
         break;
       case 'reset':
         setState(() {
@@ -945,18 +1051,23 @@ class _ClapperboardScreenState extends State<ClapperboardScreen>
     await _prefs?.setInt(_kCountdownSecsKey, _countdownSecs);
   }
 
-  Future<void> _chartModeDialog() async {
-    final picked = await showDialog<String>(
+  // A list of choices with a check next to the current one.
+  Future<String?> _pickOption(
+    String title,
+    Map<String, String> options,
+    String current,
+  ) {
+    return showDialog<String>(
       context: context,
       builder: (ctx) => SimpleDialog(
-        title: const Text('Color calibration sheet'),
-        children: _chartModes.entries
+        title: Text(title),
+        children: options.entries
             .map((e) => SimpleDialogOption(
                   onPressed: () => Navigator.pop(ctx, e.key),
                   child: Row(
                     children: [
                       Text(e.value),
-                      if (e.key == _chartMode) ...const [
+                      if (e.key == current) ...const [
                         SizedBox(width: 12),
                         Icon(Icons.check, size: 18),
                       ],
@@ -966,10 +1077,6 @@ class _ClapperboardScreenState extends State<ClapperboardScreen>
             .toList(),
       ),
     );
-    if (picked != null) {
-      setState(() => _chartMode = picked);
-      await _prefs?.setString(_kChartModeKey, picked);
-    }
   }
 
   Future<void> _textSizeDialog() async {
@@ -1234,11 +1341,13 @@ class _ClapperboardScreenState extends State<ClapperboardScreen>
     // the flash stays unmistakable.
     final chartBehindAll = _chartMode == 'full' && !_clapping;
 
+    // The Listener sees every mouse press anywhere on the board, before (and
+    // without taking it from) the cell underneath.
     return Scaffold(
       backgroundColor: bg,
       // Keep the board still when the keyboard opens for an edit dialog.
       resizeToAvoidBottomInset: false,
-      body: Stack(
+      body: Listener(onPointerDown: _onPointerDown, child: Stack(
         fit: StackFit.expand,
         children: [
           if (chartBehindAll) const _ColorChart(),
@@ -1262,7 +1371,7 @@ class _ClapperboardScreenState extends State<ClapperboardScreen>
             ),
           ),
         ],
-      ),
+      )),
     );
   }
 

@@ -1,6 +1,8 @@
 import 'dart:convert';
 
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -440,5 +442,161 @@ void main() {
     await tester.pumpAndSettle();
     expect(chart, findsNothing);
     expect(prefs.getString('color_chart'), 'off');
+  });
+
+  // --- Clicker / keyboard and mouse ----------------------------------------
+
+  Future<void> pumpWithData(WidgetTester tester,
+      [Map<String, Object> extra = const {}]) async {
+    SharedPreferences.setMockInitialValues({
+      'clap_data': jsonEncode(_sampleData),
+      ...extra,
+    });
+    await _pumpApp(tester, size: const Size(1180, 820));
+  }
+
+  testWidgets('clicker "next" (Page Down) claps', (WidgetTester tester) async {
+    await pumpWithData(tester);
+    await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+    await tester.pump();
+    expect(scaffoldColor(tester), Colors.white);
+    await tester.pump(const Duration(milliseconds: 1100));
+    expect(scaffoldColor(tester), Colors.black);
+  });
+
+  testWidgets('other clap keys: right arrow, space, enter',
+      (WidgetTester tester) async {
+    await pumpWithData(tester);
+    for (final key in [
+      LogicalKeyboardKey.arrowRight,
+      LogicalKeyboardKey.space,
+      LogicalKeyboardKey.enter,
+    ]) {
+      await tester.sendKeyEvent(key);
+      await tester.pump();
+      expect(scaffoldColor(tester), Colors.white, reason: '$key');
+      await tester.pump(const Duration(milliseconds: 1100));
+    }
+  });
+
+  testWidgets('clicker "back" (Page Up) and up arrow add a take, down removes',
+      (WidgetTester tester) async {
+    await pumpWithData(tester);
+    expect(find.text('3'), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.pageUp);
+    await tester.pump();
+    expect(find.text('4'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pump();
+    expect(find.text('5'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowDown);
+    await tester.pump();
+    expect(find.text('4'), findsOneWidget);
+    // No clap from any of these.
+    expect(scaffoldColor(tester), Colors.black);
+  });
+
+  testWidgets('a clap key starts the countdown when it is on',
+      (WidgetTester tester) async {
+    await pumpWithData(tester, {
+      'clap_countdown_on': true,
+      'clap_countdown_secs': 2,
+    });
+    await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+    await tester.pump();
+    expect(countdownText(tester), '2  1000');
+    expect(scaffoldColor(tester), Colors.black);
+    await tester.pump(const Duration(milliseconds: 2050));
+    expect(scaffoldColor(tester), Colors.white);
+    await tester.pump(const Duration(milliseconds: 1000));
+  });
+
+  testWidgets('keys do nothing to the board while a dialog is open',
+      (WidgetTester tester) async {
+    await pumpWithData(tester);
+    await _openMenuItem(tester, 'Countdown before clap');
+    expect(find.byType(TextField), findsOneWidget);
+
+    await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+    await tester.sendKeyEvent(LogicalKeyboardKey.arrowUp);
+    await tester.pump();
+    expect(scaffoldColor(tester), Colors.black);
+
+    await tester.tap(find.text('Cancel'));
+    await tester.pumpAndSettle();
+    expect(find.text('3'), findsOneWidget);
+  });
+
+  Future<void> mouseClick(WidgetTester tester, Offset at, int buttons) async {
+    final gesture = await tester.startGesture(at,
+        kind: PointerDeviceKind.mouse, buttons: buttons);
+    await gesture.up();
+    await tester.pump();
+  }
+
+  testWidgets('right click anywhere claps by default',
+      (WidgetTester tester) async {
+    await pumpWithData(tester);
+    // On the LENS value, far from CLAP.
+    await mouseClick(
+        tester, tester.getCenter(find.text('CANON 85')), kSecondaryMouseButton);
+    expect(scaffoldColor(tester), Colors.white);
+    await tester.pump(const Duration(milliseconds: 1100));
+
+    // A middle click doesn't, in this mode.
+    await mouseClick(
+        tester, tester.getCenter(find.text('CANON 85')), kMiddleMouseButton);
+    expect(scaffoldColor(tester), Colors.black);
+  });
+
+  testWidgets('a normal left click still works as a tap, without clapping',
+      (WidgetTester tester) async {
+    await pumpWithData(tester, {
+      'clap_history': jsonEncode({
+        'lens': ['CANON 85', 'CANON 50'],
+      }),
+    });
+    await mouseClick(
+        tester, tester.getCenter(find.text('CANON 85')), kPrimaryMouseButton);
+    await tester.pumpAndSettle();
+    expect(scaffoldColor(tester), Colors.black);
+    expect(find.text('CANON 50'), findsOneWidget);
+  });
+
+  testWidgets('middle button can be chosen instead; or none',
+      (WidgetTester tester) async {
+    await pumpWithData(tester);
+    final spot = tester.getCenter(find.text('FX3'));
+
+    await _openMenuItem(tester, 'Mouse click to clap: Right button');
+    await tester.tap(find.text('Middle button'));
+    await tester.pumpAndSettle();
+    final prefs = await SharedPreferences.getInstance();
+    expect(prefs.getString('mouse_clap'), 'middle');
+
+    await mouseClick(tester, spot, kSecondaryMouseButton);
+    expect(scaffoldColor(tester), Colors.black);
+    await mouseClick(tester, spot, kMiddleMouseButton);
+    expect(scaffoldColor(tester), Colors.white);
+    await tester.pump(const Duration(milliseconds: 1100));
+
+    await _openMenuItem(tester, 'Mouse click to clap: Middle button');
+    await tester.tap(find.text('Off'));
+    await tester.pumpAndSettle();
+    await mouseClick(tester, spot, kMiddleMouseButton);
+    await mouseClick(tester, spot, kSecondaryMouseButton);
+    expect(scaffoldColor(tester), Colors.black);
+  });
+
+  testWidgets('a finger touch never counts as a mouse button',
+      (WidgetTester tester) async {
+    await pumpWithData(tester);
+    final gesture = await tester.startGesture(
+        tester.getCenter(find.text('FX3')),
+        kind: PointerDeviceKind.touch);
+    await gesture.up();
+    await tester.pump();
+    expect(scaffoldColor(tester), Colors.black);
   });
 }
