@@ -31,6 +31,34 @@
 
   <title>Clapperboard</title>
   <link rel="manifest" href="manifest.json">
+
+  <!--
+    Keep the board at its normal size: no pinch-zoom or double-tap zoom.
+    iPadOS and iOS browsers ignore "user-scalable=no", so the zoom gestures
+    are cancelled here instead. The app itself uses no multi-finger or
+    zoom gestures, so nothing else is affected.
+  -->
+  <style>
+    html, body { touch-action: none; overscroll-behavior: none; }
+  </style>
+  <script>
+    (function () {
+      var stop = function (e) { e.preventDefault(); };
+      var opts = { passive: false };
+      // Safari/WebKit pinch (iPad and iPhone, including Chrome there).
+      ['gesturestart', 'gesturechange', 'gestureend'].forEach(function (t) {
+        document.addEventListener(t, stop, opts);
+      });
+      // Two or more fingers moving: pinch on other browsers.
+      document.addEventListener('touchmove', function (e) {
+        if (e.touches.length > 1) e.preventDefault();
+      }, opts);
+      // Trackpad pinch and Ctrl + mouse wheel on computers.
+      document.addEventListener('wheel', function (e) {
+        if (e.ctrlKey) e.preventDefault();
+      }, opts);
+    })();
+  </script>
 </head>
 <body>
   <!--
